@@ -11,7 +11,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY app ./app
+COPY src ./src
 RUN uv sync --frozen --no-dev
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "triage_processor.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

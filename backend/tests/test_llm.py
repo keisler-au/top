@@ -3,7 +3,7 @@ import unittest
 
 import httpx
 
-from app.llm import StructuredChatClient
+from triage_processor.clients.llm import StructuredChatClient
 
 
 class StructuredChatClientTests(unittest.IsolatedAsyncioTestCase):

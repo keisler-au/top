@@ -8,8 +8,9 @@ from typing import Annotated, Protocol
 import asyncpg
 from pydantic import BaseModel, Field, StringConstraints
 
-from app.config import DATABASE_URL
-from app.llm import StructuredChatClient
+from triage_processor.clients.llm import StructuredChatClient
+from triage_processor.config import DATABASE_URL
+from triage_processor.job_queue import QueueSettings, run_job_loop
 
 LOGGER = logging.getLogger(__name__)
 
@@ -84,7 +85,9 @@ class LocalTopicLLMClient:
         return TopicDecision.model_validate(result)
 
     async def close(self) -> None:
-        await self._client.aclose()
+        await self._client.close()
+
+
 def _resolve_topic(choice: TopicChoice, existing_topics: list[str]) -> str:
     canonical_topics = {topic.casefold(): topic for topic in existing_topics}
     canonical = canonical_topics.get(choice.name.casefold())
@@ -174,6 +177,7 @@ async def process_next_input(
     *,
     similar_limit: int,
     topic_limit: int,
+    input_id: int | None = None,
 ) -> bool:
     if similar_limit < 1:
         raise ValueError("similar_limit must be at least 1")
@@ -182,22 +186,41 @@ async def process_next_input(
 
     async with pool.acquire() as connection:
         async with connection.transaction():
-            original = await connection.fetchrow(
-                """
-                SELECT
-                    inputs.id,
-                    inputs.original_text,
-                    embeddings.embedding::text AS embedding,
-                    embeddings.embedding_model
-                FROM original_inputs AS inputs
-                LEFT JOIN input_embeddings AS embeddings
-                    ON embeddings.original_input_id = inputs.id
-                WHERE inputs.status = 'ready_for_analysis'
-                ORDER BY inputs.id
-                FOR UPDATE OF inputs SKIP LOCKED
-                LIMIT 1
-                """
-            )
+            if input_id is None:
+                original = await connection.fetchrow(
+                    """
+                    SELECT
+                        inputs.id,
+                        inputs.original_text,
+                        embeddings.embedding::text AS embedding,
+                        embeddings.embedding_model
+                    FROM original_inputs AS inputs
+                    LEFT JOIN input_embeddings AS embeddings
+                        ON embeddings.original_input_id = inputs.id
+                    WHERE inputs.status = 'ready_for_analysis'
+                    ORDER BY inputs.id
+                    FOR UPDATE OF inputs SKIP LOCKED
+                    LIMIT 1
+                    """
+                )
+            else:
+                original = await connection.fetchrow(
+                    """
+                    SELECT
+                        inputs.id,
+                        inputs.original_text,
+                        embeddings.embedding::text AS embedding,
+                        embeddings.embedding_model
+                    FROM original_inputs AS inputs
+                    LEFT JOIN input_embeddings AS embeddings
+                        ON embeddings.original_input_id = inputs.id
+                    WHERE
+                        inputs.id = $1
+                        AND inputs.status = 'ready_for_analysis'
+                    FOR UPDATE OF inputs
+                    """,
+                    input_id,
+                )
             if original is None:
                 return False
             if original["embedding"] is None:
@@ -377,33 +400,32 @@ async def run_worker(
     topic_limit: int,
 ) -> None:
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
+    queue_settings = QueueSettings.from_env()
     assigner = LocalTopicLLMClient(
         base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
-        model=os.getenv("LLM_MODEL", "llama3.2"),
+        model=os.getenv("LLM_MODEL", "qwen3:4b"),
         api_key=os.getenv("LLM_API_KEY"),
         timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
     )
 
     try:
-        while True:
-            try:
-                processed = await process_next_input(
-                    pool,
-                    assigner,
-                    similar_limit=similar_limit,
-                    topic_limit=topic_limit,
-                )
-            except Exception:
-                LOGGER.exception("Topic assignment failed")
-                if once:
-                    raise
-                await asyncio.sleep(poll_interval)
-                continue
+        async def handle(input_id: int) -> None:
+            await process_next_input(
+                pool,
+                assigner,
+                similar_limit=similar_limit,
+                topic_limit=topic_limit,
+                input_id=input_id,
+            )
 
-            if once or not processed:
-                if once:
-                    return
-                await asyncio.sleep(poll_interval)
+        await run_job_loop(
+            pool,
+            job_type="topics",
+            handler=handle,
+            once=once,
+            poll_interval=poll_interval,
+            settings=queue_settings,
+        )
     finally:
         await assigner.close()
         await pool.close()

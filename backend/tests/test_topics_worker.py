@@ -1,6 +1,6 @@
 import unittest
 
-from app.workers.topics import (
+from triage_processor.workers.topics import (
     LocalTopicLLMClient,
     SegmentTopicAssignment,
     TopicChoice,
@@ -35,11 +35,13 @@ class FakeConnection:
         self.topics = topics or []
         self.executed = []
         self.segment_updates = []
+        self.fetchrow_values = []
 
     def transaction(self):
         return AsyncContext(None)
 
-    async def fetchrow(self, query):
+    async def fetchrow(self, query, *values):
+        self.fetchrow_values.append(values)
         return self.original
 
     async def fetch(self, query, *values):
@@ -84,7 +86,7 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             model="test-model",
             timeout_seconds=1,
         )
-        await client._client.close()
+        await client.close()
 
     async def test_assigns_topics_using_similar_evidence(self):
         connection = FakeConnection(
@@ -148,9 +150,11 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             assigner,
             similar_limit=5,
             topic_limit=50,
+            input_id=10,
         )
 
         self.assertTrue(processed)
+        self.assertEqual(connection.fetchrow_values, [(10,)])
         self.assertEqual(
             assigner.context["existing_topics"],
             ["Housing", "Transport"],

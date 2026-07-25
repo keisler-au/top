@@ -1,6 +1,6 @@
 import unittest
 
-from app.workers.eligibility_segmentation import (
+from triage_processor.workers.eligibility_segmentation import (
     LocalLLMClient,
     SegmentationDecision,
     process_next_input,
@@ -23,11 +23,13 @@ class FakeConnection:
         self.row = row
         self.inserted_segments = []
         self.executed = []
+        self.fetchrow_values = []
 
     def transaction(self):
         return AsyncContext(None)
 
-    async def fetchrow(self, query):
+    async def fetchrow(self, query, *values):
+        self.fetchrow_values.append(values)
         return self.row
 
     async def executemany(self, query, values):
@@ -65,7 +67,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             model="test-model",
             timeout_seconds=1,
         )
-        await client._client.close()
+        await client.close()
 
     async def test_eligible_input_saves_ordered_segments(self):
         connection = FakeConnection({"id": 42, "original_text": "Two topics"})
@@ -76,9 +78,14 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        processed = await process_next_input(FakePool(connection), segmenter)
+        processed = await process_next_input(
+            FakePool(connection),
+            segmenter,
+            input_id=42,
+        )
 
         self.assertTrue(processed)
+        self.assertEqual(connection.fetchrow_values, [(42,)])
         self.assertEqual(segmenter.received_text, "Two topics")
         self.assertEqual(
             connection.inserted_segments,

@@ -2,8 +2,8 @@ import unittest
 
 import httpx
 
-from app.workers.embeddings import (
-    OllamaEmbeddingClient,
+from triage_processor.clients.ollama import OllamaEmbeddingClient
+from triage_processor.workers.embeddings import (
     _embed_in_batches,
     _to_pgvector,
     process_next_input,
@@ -27,11 +27,13 @@ class FakeConnection:
         self.segments = segments or []
         self.embedding_rows = []
         self.executed = []
+        self.fetchrow_values = []
 
     def transaction(self):
         return AsyncContext(None)
 
-    async def fetchrow(self, query):
+    async def fetchrow(self, query, *values):
+        self.fetchrow_values.append(values)
         return self.original
 
     async def fetch(self, query, input_id):
@@ -116,9 +118,11 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
             embedder,
             batch_size=2,
             embedding_model="embeddinggemma",
+            input_id=10,
         )
 
         self.assertTrue(processed)
+        self.assertEqual(connection.fetchrow_values, [(10,)])
         self.assertEqual(
             embedder.calls,
             [

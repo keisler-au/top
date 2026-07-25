@@ -11,8 +11,9 @@ from typing import Annotated, Literal, Protocol
 import asyncpg
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
-from app.config import DATABASE_URL
-from app.llm import StructuredChatClient
+from triage_processor.clients.llm import StructuredChatClient
+from triage_processor.config import DATABASE_URL
+from triage_processor.job_queue import QueueSettings, run_job_loop
 
 LOGGER = logging.getLogger(__name__)
 THEME_WORKER_LOCK_ID = 847_319_204
@@ -117,7 +118,9 @@ class LocalThemeLLMClient:
         return ThemeDecision.model_validate(result)
 
     async def close(self) -> None:
-        await self._client.aclose()
+        await self._client.close()
+
+
 def _parse_vector(value: str) -> tuple[float, ...]:
     parsed = json.loads(value)
     if not isinstance(parsed, list) or not parsed:
@@ -525,32 +528,34 @@ async def run_worker(
     min_group_size: int,
 ) -> None:
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
+    queue_settings = QueueSettings.from_env()
     suggester = LocalThemeLLMClient(
         base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
-        model=os.getenv("LLM_MODEL", "llama3.2"),
+        model=os.getenv("LLM_MODEL", "qwen3:4b"),
         api_key=os.getenv("LLM_API_KEY"),
         timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
     )
     try:
-        while True:
-            try:
-                saved = await process_cycle(
-                    pool,
-                    suggester,
-                    candidate_limit=candidate_limit,
-                    theme_limit=theme_limit,
-                    similarity_threshold=similarity_threshold,
-                    topic_similarity_threshold=topic_similarity_threshold,
-                    min_group_size=min_group_size,
-                )
-                LOGGER.info("Theme cycle saved %s suggestions", saved)
-            except Exception:
-                LOGGER.exception("Theme management cycle failed")
-                if once:
-                    raise
-            if once:
-                return
-            await asyncio.sleep(interval)
+        async def handle(_input_id: int) -> None:
+            saved = await process_cycle(
+                pool,
+                suggester,
+                candidate_limit=candidate_limit,
+                theme_limit=theme_limit,
+                similarity_threshold=similarity_threshold,
+                topic_similarity_threshold=topic_similarity_threshold,
+                min_group_size=min_group_size,
+            )
+            LOGGER.info("Theme cycle saved %s suggestions", saved)
+
+        await run_job_loop(
+            pool,
+            job_type="themes",
+            handler=handle,
+            once=once,
+            poll_interval=interval,
+            settings=queue_settings,
+        )
     finally:
         await suggester.close()
         await pool.close()
@@ -564,7 +569,7 @@ def main() -> None:
     parser.add_argument(
         "--interval",
         type=float,
-        default=float(os.getenv("THEME_WORKER_INTERVAL", "300")),
+        default=float(os.getenv("THEME_WORKER_INTERVAL", "2")),
     )
     parser.add_argument(
         "--candidate-limit",

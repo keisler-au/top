@@ -7,8 +7,9 @@ from typing import Annotated, Protocol
 import asyncpg
 from pydantic import BaseModel, Field, StringConstraints, model_validator
 
-from app.config import DATABASE_URL
-from app.llm import StructuredChatClient
+from triage_processor.clients.llm import StructuredChatClient
+from triage_processor.config import DATABASE_URL
+from triage_processor.job_queue import QueueSettings, run_job_loop
 
 LOGGER = logging.getLogger(__name__)
 
@@ -77,23 +78,38 @@ class LocalLLMClient:
         return SegmentationDecision.model_validate(result)
 
     async def close(self) -> None:
-        await self._client.aclose()
+        await self._client.close()
+
+
 async def process_next_input(
     pool: asyncpg.Pool,
     segmenter: EligibilitySegmenter,
+    *,
+    input_id: int | None = None,
 ) -> bool:
     async with pool.acquire() as connection:
         async with connection.transaction():
-            row = await connection.fetchrow(
-                """
-                SELECT id, original_text
-                FROM original_inputs
-                WHERE status = 'new'
-                ORDER BY id
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
-                """
-            )
+            if input_id is None:
+                row = await connection.fetchrow(
+                    """
+                    SELECT id, original_text
+                    FROM original_inputs
+                    WHERE status = 'new'
+                    ORDER BY id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                    """
+                )
+            else:
+                row = await connection.fetchrow(
+                    """
+                    SELECT id, original_text
+                    FROM original_inputs
+                    WHERE id = $1 AND status = 'new'
+                    FOR UPDATE
+                    """,
+                    input_id,
+                )
             if row is None:
                 return False
 
@@ -140,28 +156,30 @@ async def process_next_input(
 
 async def run_worker(*, once: bool, poll_interval: float) -> None:
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
+    queue_settings = QueueSettings.from_env()
     segmenter = LocalLLMClient(
         base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
-        model=os.getenv("LLM_MODEL", "llama3.2"),
+        model=os.getenv("LLM_MODEL", "qwen3:4b"),
         api_key=os.getenv("LLM_API_KEY"),
         timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
     )
 
     try:
-        while True:
-            try:
-                processed = await process_next_input(pool, segmenter)
-            except Exception:
-                LOGGER.exception("Eligibility and segmentation failed")
-                if once:
-                    raise
-                await asyncio.sleep(poll_interval)
-                continue
+        async def handle(input_id: int) -> None:
+            await process_next_input(
+                pool,
+                segmenter,
+                input_id=input_id,
+            )
 
-            if once or not processed:
-                if once:
-                    return
-                await asyncio.sleep(poll_interval)
+        await run_job_loop(
+            pool,
+            job_type="eligibility_segmentation",
+            handler=handle,
+            once=once,
+            poll_interval=poll_interval,
+            settings=queue_settings,
+        )
     finally:
         await segmenter.close()
         await pool.close()

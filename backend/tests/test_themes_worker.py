@@ -1,6 +1,6 @@
 import unittest
 
-from app.workers.themes import (
+from triage_processor.workers.themes import (
     AnalysisUnit,
     LocalThemeLLMClient,
     ThemeDecision,
@@ -101,7 +101,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
             model="test-model",
             timeout_seconds=1,
         )
-        await client._client.close()
+        await client.close()
 
     def test_groups_related_units_from_distinct_inputs(self):
         units = [

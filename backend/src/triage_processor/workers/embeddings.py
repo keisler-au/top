@@ -1,84 +1,24 @@
 import argparse
 import asyncio
 import logging
-import math
 import os
 from collections.abc import Sequence
 from typing import Protocol
 
 import asyncpg
-import httpx
 
-from app.config import DATABASE_URL
+from triage_processor.clients.ollama import (
+    OllamaEmbeddingClient,
+    validate_vector,
+)
+from triage_processor.config import DATABASE_URL
+from triage_processor.job_queue import QueueSettings, run_job_loop
 
 LOGGER = logging.getLogger(__name__)
 
 
 class TextEmbedder(Protocol):
     async def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
-
-
-class OllamaEmbeddingClient:
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        model: str,
-        timeout_seconds: float = 120,
-        dimensions: int | None = None,
-        transport: httpx.AsyncBaseTransport | None = None,
-    ) -> None:
-        self._model = model
-        self._dimensions = dimensions
-        self._client = httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
-            timeout=timeout_seconds,
-            transport=transport,
-        )
-
-    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        if not texts:
-            return []
-
-        request_body: dict[str, object] = {
-            "model": self._model,
-            "input": list(texts),
-            "truncate": False,
-        }
-        if self._dimensions is not None:
-            request_body["dimensions"] = self._dimensions
-
-        response = await self._client.post("/api/embed", json=request_body)
-        response.raise_for_status()
-        response_body = response.json()
-
-        embeddings = response_body.get("embeddings")
-        if not isinstance(embeddings, list):
-            raise ValueError("Ollama response did not contain an embeddings array")
-        if len(embeddings) != len(texts):
-            raise ValueError(
-                "Ollama returned a different number of embeddings than inputs"
-            )
-
-        return [_validate_vector(vector) for vector in embeddings]
-
-    async def close(self) -> None:
-        await self._client.aclose()
-
-
-def _validate_vector(vector: object) -> list[float]:
-    if not isinstance(vector, list) or not vector:
-        raise ValueError("Ollama returned an empty or invalid embedding")
-
-    validated: list[float] = []
-    for component in vector:
-        if isinstance(component, bool) or not isinstance(component, (int, float)):
-            raise ValueError("embedding components must be numbers")
-        value = float(component)
-        if not math.isfinite(value):
-            raise ValueError("embedding components must be finite")
-        validated.append(value)
-    return validated
 
 
 def _to_pgvector(vector: Sequence[float]) -> str:
@@ -105,7 +45,7 @@ async def _embed_in_batches(
             )
 
         for vector in vectors:
-            validated = _validate_vector(vector)
+            validated = validate_vector(vector)
             dimensions = len(validated)
             if expected_dimensions is None:
                 expected_dimensions = dimensions
@@ -122,22 +62,34 @@ async def process_next_input(
     *,
     batch_size: int,
     embedding_model: str,
+    input_id: int | None = None,
 ) -> bool:
     if not embedding_model.strip():
         raise ValueError("embedding_model cannot be blank")
 
     async with pool.acquire() as connection:
         async with connection.transaction():
-            original = await connection.fetchrow(
-                """
-                SELECT id, original_text
-                FROM original_inputs
-                WHERE status = 'ready_for_embedding'
-                ORDER BY id
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
-                """
-            )
+            if input_id is None:
+                original = await connection.fetchrow(
+                    """
+                    SELECT id, original_text
+                    FROM original_inputs
+                    WHERE status = 'ready_for_embedding'
+                    ORDER BY id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                    """
+                )
+            else:
+                original = await connection.fetchrow(
+                    """
+                    SELECT id, original_text
+                    FROM original_inputs
+                    WHERE id = $1 AND status = 'ready_for_embedding'
+                    FOR UPDATE
+                    """,
+                    input_id,
+                )
             if original is None:
                 return False
 
@@ -218,8 +170,12 @@ async def run_worker(
     if dimensions is not None and dimensions < 1:
         raise ValueError("OLLAMA_EMBEDDING_DIMENSIONS must be at least 1")
 
-    embedding_model = os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma")
+    embedding_model = os.getenv(
+        "OLLAMA_EMBEDDING_MODEL",
+        "nomic-embed-text",
+    )
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
+    queue_settings = QueueSettings.from_env()
     embedder = OllamaEmbeddingClient(
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         model=embedding_model,
@@ -228,25 +184,23 @@ async def run_worker(
     )
 
     try:
-        while True:
-            try:
-                processed = await process_next_input(
-                    pool,
-                    embedder,
-                    batch_size=batch_size,
-                    embedding_model=embedding_model,
-                )
-            except Exception:
-                LOGGER.exception("Embedding generation failed")
-                if once:
-                    raise
-                await asyncio.sleep(poll_interval)
-                continue
+        async def handle(input_id: int) -> None:
+            await process_next_input(
+                pool,
+                embedder,
+                batch_size=batch_size,
+                embedding_model=embedding_model,
+                input_id=input_id,
+            )
 
-            if once or not processed:
-                if once:
-                    return
-                await asyncio.sleep(poll_interval)
+        await run_job_loop(
+            pool,
+            job_type="embeddings",
+            handler=handle,
+            once=once,
+            poll_interval=poll_interval,
+            settings=queue_settings,
+        )
     finally:
         await embedder.close()
         await pool.close()

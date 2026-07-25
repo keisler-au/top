@@ -10,7 +10,7 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-enable-pgvector.sql:ro
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/01-enable-pgvector.sql:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -27,10 +27,52 @@ services:
       - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  ollama-init:
+    image: ollama/ollama
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama pull "$${LLM_MODEL}"
+        ollama pull "$${OLLAMA_EMBEDDING_MODEL}"
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  migrate:
+    image: pgvector/pgvector:pg17
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGDATABASE: ${POSTGRES_DB:-triage}
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    command:
+      - psql
+      - --set
+      - ON_ERROR_STOP=1
+      - --file
+      - /migrations/008_add_worker_jobs.sql
+    volumes:
+      - ./infrastructure/postgres/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   api:
     build:
-      context: .
+      context: ./backend
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
@@ -39,92 +81,126 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       ollama:
-        condition: service_started
+        condition: service_healthy
 
   eligibility-segmentation:
     build:
-      context: .
-    command: ["python", "-m", "app.workers.eligibility_segmentation"]
+      context: ./backend
+    command: ["python", "-m", "triage_processor.workers.eligibility_segmentation"]
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
-      LLM_MODEL: ${LLM_MODEL:-llama3.2}
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
       WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
+      QUEUE_LEASE_SECONDS: ${QUEUE_LEASE_SECONDS:-300}
+      QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-5}
+      QUEUE_RETRY_BASE_SECONDS: ${QUEUE_RETRY_BASE_SECONDS:-5}
+      QUEUE_RETRY_MAX_SECONDS: ${QUEUE_RETRY_MAX_SECONDS:-300}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       ollama:
-        condition: service_started
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
 
   embeddings:
     build:
-      context: .
-    command: ["python", "-m", "app.workers.embeddings"]
+      context: ./backend
+    command: ["python", "-m", "triage_processor.workers.embeddings"]
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
-      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-embeddinggemma}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
       OLLAMA_EMBEDDING_DIMENSIONS:
       OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-120}
       OLLAMA_EMBEDDING_BATCH_SIZE: ${OLLAMA_EMBEDDING_BATCH_SIZE:-16}
       WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
+      QUEUE_LEASE_SECONDS: ${QUEUE_LEASE_SECONDS:-300}
+      QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-5}
+      QUEUE_RETRY_BASE_SECONDS: ${QUEUE_RETRY_BASE_SECONDS:-5}
+      QUEUE_RETRY_MAX_SECONDS: ${QUEUE_RETRY_MAX_SECONDS:-300}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       ollama:
-        condition: service_started
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
 
   topics:
     build:
-      context: .
-    command: ["python", "-m", "app.workers.topics"]
+      context: ./backend
+    command: ["python", "-m", "triage_processor.workers.topics"]
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
-      LLM_MODEL: ${LLM_MODEL:-llama3.2}
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
       WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
       TOPIC_SIMILAR_LIMIT: ${TOPIC_SIMILAR_LIMIT:-5}
       TOPIC_EXISTING_LIMIT: ${TOPIC_EXISTING_LIMIT:-50}
+      QUEUE_LEASE_SECONDS: ${QUEUE_LEASE_SECONDS:-300}
+      QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-5}
+      QUEUE_RETRY_BASE_SECONDS: ${QUEUE_RETRY_BASE_SECONDS:-5}
+      QUEUE_RETRY_MAX_SECONDS: ${QUEUE_RETRY_MAX_SECONDS:-300}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       ollama:
-        condition: service_started
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
 
   themes:
     build:
-      context: .
-    command: ["python", "-m", "app.workers.themes"]
+      context: ./backend
+    command: ["python", "-m", "triage_processor.workers.themes"]
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
-      LLM_MODEL: ${LLM_MODEL:-llama3.2}
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
-      THEME_WORKER_INTERVAL: ${THEME_WORKER_INTERVAL:-300}
+      THEME_WORKER_INTERVAL: ${THEME_WORKER_INTERVAL:-2}
       THEME_CANDIDATE_LIMIT: ${THEME_CANDIDATE_LIMIT:-500}
       THEME_EXISTING_LIMIT: ${THEME_EXISTING_LIMIT:-50}
       THEME_SIMILARITY_THRESHOLD: ${THEME_SIMILARITY_THRESHOLD:-0.82}
       THEME_TOPIC_SIMILARITY_THRESHOLD: ${THEME_TOPIC_SIMILARITY_THRESHOLD:-0.65}
       THEME_MIN_GROUP_SIZE: ${THEME_MIN_GROUP_SIZE:-2}
+      QUEUE_LEASE_SECONDS: ${QUEUE_LEASE_SECONDS:-300}
+      QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-5}
+      QUEUE_RETRY_BASE_SECONDS: ${QUEUE_RETRY_BASE_SECONDS:-5}
+      QUEUE_RETRY_MAX_SECONDS: ${QUEUE_RETRY_MAX_SECONDS:-300}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       ollama:
-        condition: service_started
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:
