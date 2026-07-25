@@ -1,6 +1,7 @@
 import unittest
 
 from app.workers.eligibility_segmentation import (
+    LocalLLMClient,
     SegmentationDecision,
     process_next_input,
 )
@@ -58,6 +59,14 @@ class FakeSegmenter:
 
 
 class WorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_llm_client_constructs(self):
+        client = LocalLLMClient(
+            base_url="http://localhost:11434/v1",
+            model="test-model",
+            timeout_seconds=1,
+        )
+        await client._client.close()
+
     async def test_eligible_input_saves_ordered_segments(self):
         connection = FakeConnection({"id": 42, "original_text": "Two topics"})
         segmenter = FakeSegmenter(

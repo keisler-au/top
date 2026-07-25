@@ -20,5 +20,112 @@ services:
       retries: 5
       start_period: 10s
 
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+
+  api:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+
+  eligibility-segmentation:
+    build:
+      context: .
+    command: ["python", "-m", "app.workers.eligibility_segmentation"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-llama3.2}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+
+  embeddings:
+    build:
+      context: .
+    command: ["python", "-m", "app.workers.embeddings"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-embeddinggemma}
+      OLLAMA_EMBEDDING_DIMENSIONS:
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-120}
+      OLLAMA_EMBEDDING_BATCH_SIZE: ${OLLAMA_EMBEDDING_BATCH_SIZE:-16}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+
+  topics:
+    build:
+      context: .
+    command: ["python", "-m", "app.workers.topics"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-llama3.2}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
+      TOPIC_SIMILAR_LIMIT: ${TOPIC_SIMILAR_LIMIT:-5}
+      TOPIC_EXISTING_LIMIT: ${TOPIC_EXISTING_LIMIT:-50}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+
+  themes:
+    build:
+      context: .
+    command: ["python", "-m", "app.workers.themes"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-llama3.2}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+      THEME_WORKER_INTERVAL: ${THEME_WORKER_INTERVAL:-300}
+      THEME_CANDIDATE_LIMIT: ${THEME_CANDIDATE_LIMIT:-500}
+      THEME_EXISTING_LIMIT: ${THEME_EXISTING_LIMIT:-50}
+      THEME_SIMILARITY_THRESHOLD: ${THEME_SIMILARITY_THRESHOLD:-0.82}
+      THEME_TOPIC_SIMILARITY_THRESHOLD: ${THEME_TOPIC_SIMILARITY_THRESHOLD:-0.65}
+      THEME_MIN_GROUP_SIZE: ${THEME_MIN_GROUP_SIZE:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+
 volumes:
   postgres_data:
+  ollama_models:

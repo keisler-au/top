@@ -1,4 +1,4 @@
-This system stores original comments, embeds them for similarity search, asks a local LLM to suggest tags/themes/flags, and supports human review.
+This system stores original comments, embeds them for similarity search, asks a local LLM to suggest tags/themes/flags
 
 # Project Context
 
@@ -88,3 +88,33 @@ Topics and themes are stored separately but linked because their relationship ma
 * Start with sequential or scheduled workers.
 * Add a queue only when continuous processing, retries or scaling are needed.
 * Prefer existing topics and themes before creating new ones.
+
+## Run the full stack with Docker Compose
+
+The Compose stack includes PostgreSQL, Ollama, the FastAPI API, and all four
+workers. On the first run, start Ollama and PostgreSQL and download the default
+chat and embedding models:
+
+```bash
+docker compose up -d postgres ollama
+docker compose exec ollama ollama pull llama3.2
+docker compose exec ollama ollama pull embeddinggemma
+```
+
+Model downloads are stored in the persistent `ollama_models` volume, so this
+setup is only required once. Then start the full stack:
+
+```bash
+docker compose up --build
+```
+
+The API is available at `http://localhost:8000`, PostgreSQL at
+`localhost:5432`, and Ollama at `http://localhost:11434`. Stop the stack with
+`docker compose down`; the PostgreSQL data and downloaded Ollama models remain
+in their named volumes.
+
+Compose environment variables can override the defaults, for example:
+
+```bash
+API_PORT=8080 LLM_MODEL=llama3.2 docker compose up --build
+```

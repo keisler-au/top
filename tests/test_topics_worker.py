@@ -1,6 +1,7 @@
 import unittest
 
 from app.workers.topics import (
+    LocalTopicLLMClient,
     SegmentTopicAssignment,
     TopicChoice,
     TopicDecision,
@@ -77,6 +78,14 @@ class FakeAssigner:
 
 
 class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_topic_llm_client_constructs(self):
+        client = LocalTopicLLMClient(
+            base_url="http://localhost:11434/v1",
+            model="test-model",
+            timeout_seconds=1,
+        )
+        await client._client.close()
+
     async def test_assigns_topics_using_similar_evidence(self):
         connection = FakeConnection(
             original={

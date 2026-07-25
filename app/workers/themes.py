@@ -106,7 +106,7 @@ class LocalThemeLLMClient:
             base_url=base_url,
             model=model,
             api_key=api_key,
-            timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
         )
 
     async def suggest(self, context: dict[str, object]) -> ThemeDecision:

@@ -73,7 +73,7 @@ class LocalTopicLLMClient:
             base_url=base_url,
             model=model,
             api_key=api_key,
-            timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
         )
 
     async def assign(self, context: dict[str, object]) -> TopicDecision:

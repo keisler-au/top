@@ -66,7 +66,7 @@ class LocalLLMClient:
             base_url=base_url,
             model=model,
             api_key=api_key,
-            timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
         )
 
     async def classify(self, original_text: str) -> SegmentationDecision:

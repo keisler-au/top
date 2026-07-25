@@ -2,6 +2,7 @@ import unittest
 
 from app.workers.themes import (
     AnalysisUnit,
+    LocalThemeLLMClient,
     ThemeDecision,
     group_related_units,
     process_cycle,
@@ -94,6 +95,14 @@ def unit(
 
 
 class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_theme_llm_client_constructs(self):
+        client = LocalThemeLLMClient(
+            base_url="http://localhost:11434/v1",
+            model="test-model",
+            timeout_seconds=1,
+        )
+        await client._client.close()
+
     def test_groups_related_units_from_distinct_inputs(self):
         units = [
             unit(1, 10, "Housing", (1.0, 0.0)),
