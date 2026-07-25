@@ -1,3 +1,8 @@
+-- Fresh-install snapshot of the current schema. Incremental migrations in
+-- infrastructure/postgres/migrations/ are the source of truth for upgrades.
+-- When a migration changes the base schema, keep this snapshot and the seeded
+-- schema_migrations entries in sync.
+
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS original_inputs (
@@ -133,19 +138,10 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
     rationale TEXT NOT NULL
         CONSTRAINT theme_suggestions_rationale_nonempty
         CHECK (btrim(rationale) <> '' AND char_length(rationale) <= 2000),
-    review_status TEXT NOT NULL DEFAULT 'pending'
-        CONSTRAINT theme_suggestions_review_status_valid
-        CHECK (review_status IN ('pending', 'accepted', 'rejected')),
     group_fingerprint TEXT NOT NULL UNIQUE
         CONSTRAINT theme_suggestions_fingerprint_valid
         CHECK (group_fingerprint ~ '^[0-9a-f]{64}$'),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    reviewed_at TIMESTAMPTZ,
-    CONSTRAINT theme_suggestions_reviewed_at_consistent
-        CHECK (
-            (review_status = 'pending' AND reviewed_at IS NULL)
-            OR (review_status <> 'pending' AND reviewed_at IS NOT NULL)
-        )
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS theme_suggestion_existing_themes (
@@ -271,3 +267,20 @@ CREATE TRIGGER original_inputs_enqueue_job
 AFTER INSERT OR UPDATE OF status ON original_inputs
 FOR EACH ROW
 EXECUTE FUNCTION enqueue_original_input_job();
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    filename TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO schema_migrations (filename)
+VALUES
+    ('002_add_segment_inputs.sql'),
+    ('003_add_input_status.sql'),
+    ('004_add_ready_for_analysis_status.sql'),
+    ('005_add_completed_status.sql'),
+    ('006_add_theme_management.sql'),
+    ('007_align_worker_contracts.sql'),
+    ('008_add_worker_jobs.sql'),
+    ('009_remove_theme_suggestion_review.sql')
+ON CONFLICT DO NOTHING;

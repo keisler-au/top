@@ -58,14 +58,9 @@ services:
       PGDATABASE: ${POSTGRES_DB:-triage}
       PGUSER: ${POSTGRES_USER:-postgres}
       PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    command:
-      - psql
-      - --set
-      - ON_ERROR_STOP=1
-      - --file
-      - /migrations/008_add_worker_jobs.sql
+    command: ["/bin/sh", "/postgres/run-migrations.sh"]
     volumes:
-      - ./infrastructure/postgres/migrations:/migrations:ro
+      - ./infrastructure/postgres:/postgres:ro
     depends_on:
       postgres:
         condition: service_healthy

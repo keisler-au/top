@@ -21,6 +21,13 @@ renewable leases, so interrupted jobs become available again. Processing
 failures use exponential backoff and enter the `failed` dead-letter state after
 the configured attempt limit.
 
+The one-shot Compose `migrate` service applies all pending numbered files from
+`infrastructure/postgres/migrations/` before workers start. It records each
+success in `schema_migrations`, so restarting Compose is idempotent and a
+database that is several versions behind is upgraded in filename order. Each
+migration and its tracking row are committed atomically. Migration
+`008_add_worker_jobs.sql` creates and backfills the queue.
+
 ## Configuration
 
 ```text

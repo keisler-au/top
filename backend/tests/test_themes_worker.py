@@ -134,7 +134,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(groups, [])
 
-    async def test_cycle_saves_review_suggestion_and_evidence(self):
+    async def test_cycle_saves_final_suggestion_and_evidence(self):
         connection = FakeConnection(
             candidates=[
                 {

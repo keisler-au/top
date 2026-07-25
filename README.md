@@ -67,7 +67,7 @@ Runs from queued completion events across completed inputs.
 * Retrieve relevant existing themes.
 * Ask the LLM to reuse, update, merge or create themes.
 * Link themes to relevant topics and supporting inputs.
-* Save reviewable suggestions without modifying accepted themes directly.
+* Save final suggestion records with their topics and supporting inputs.
 
 ## Key distinction
 
@@ -145,6 +145,14 @@ start. Model downloads are stored in the persistent `ollama_models` volume, so
 subsequent startups reuse them. The workers communicate with the Ollama
 container directly; no host Ollama process is required.
 
+Before the API and workers start, the one-shot `migrate` service applies every
+pending SQL file in `infrastructure/postgres/migrations/` in filename order.
+Applied filenames are tracked in `schema_migrations`, so the service is safe to
+run repeatedly and can bring an older persistent database through multiple
+migrations in one startup. Each migration and its tracking row commit in the
+same transaction. Add new migrations as numbered `.sql` files; no Compose
+change is needed.
+
 The API is available at `http://localhost:8000`, PostgreSQL at
 `localhost:5432`, and Ollama at `http://localhost:11434`. Stop the stack with
 `docker compose down`; the PostgreSQL data and downloaded Ollama models remain
@@ -179,9 +187,9 @@ leases; an interrupted worker's job becomes claimable again after
 `QUEUE_LEASE_SECONDS`. Failures are retried with exponential backoff and move
 to the `failed` dead-letter state after `QUEUE_MAX_ATTEMPTS`.
 
-The Compose `migrate` service installs the queue schema and backfills jobs for
-inputs that were already in progress. Useful queue settings and their defaults
-are:
+Migration `008_add_worker_jobs.sql`, applied by the Compose `migrate` service,
+installs the queue schema and backfills jobs for inputs that were already in
+progress. Useful queue settings and their defaults are:
 
 ```text
 QUEUE_LEASE_SECONDS=300

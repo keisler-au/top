@@ -563,7 +563,7 @@ async def run_worker(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Suggest recurring themes for human review."
+        description="Save recurring theme suggestions."
     )
     parser.add_argument("--once", action="store_true")
     parser.add_argument(
