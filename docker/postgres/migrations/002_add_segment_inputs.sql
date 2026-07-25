@@ -14,9 +14,9 @@ CREATE TABLE segment_inputs (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     original_input_id BIGINT NOT NULL
         REFERENCES original_inputs (id) ON DELETE CASCADE,
-    segment_index INTEGER NOT NULL
+    segment_order INTEGER NOT NULL
         CONSTRAINT segment_inputs_index_nonnegative
-        CHECK (segment_index >= 0),
+        CHECK (segment_order >= 0),
     segment_text TEXT NOT NULL
         CONSTRAINT segment_inputs_text_nonempty
         CHECK (btrim(segment_text) <> ''),
@@ -24,7 +24,7 @@ CREATE TABLE segment_inputs (
     topic TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT segment_inputs_original_position_unique
-        UNIQUE (original_input_id, segment_index)
+        UNIQUE (original_input_id, segment_order)
 );
 
 ALTER TABLE input_embeddings

@@ -1,4 +1,3 @@
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -8,10 +7,7 @@ import asyncpg
 from fastapi import FastAPI, Request, status
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/triage",
-)
+from app.config import DATABASE_URL
 
 RequiredText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -27,7 +23,7 @@ class InputResponse(BaseModel):
     id: int
     original_text: str
     source: str
-    theme: str | None
+    status: str
     topic: str | None
     created_at: datetime
 
@@ -56,9 +52,9 @@ async def create_input(payload: InputCreate, request: Request) -> InputResponse:
     async with request.app.state.db_pool.acquire() as connection:
         row = await connection.fetchrow(
             """
-            INSERT INTO inputs (original_text, source)
+            INSERT INTO original_inputs (original_text, source)
             VALUES ($1, $2)
-            RETURNING id, original_text, source, theme, topic, created_at
+            RETURNING id, original_text, source, status, topic, created_at
             """,
             payload.original_text,
             payload.source,
