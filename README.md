@@ -230,3 +230,19 @@ Individual worker services can be scaled independently, for example:
 ```bash
 docker compose up --build --scale embeddings=2
 ```
+
+## Interactive manual testing
+
+With the Compose stack running, use the interactive runner to submit sample
+inputs and inspect their stored pipeline results:
+
+```bash
+python3 scripts/manual_test.py
+```
+
+Each invocation creates a unique source tag. To inspect a previous run, copy
+the source shown in its menu and pass it explicitly:
+
+```bash
+python3 scripts/manual_test.py --source manual-20260726-143000
+```
