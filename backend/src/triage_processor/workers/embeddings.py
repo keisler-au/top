@@ -21,6 +21,16 @@ class TextEmbedder(Protocol):
     async def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
 
 
+def build_embedding_input(
+    *,
+    answer_text: str,
+    question_text: str | None,
+) -> str:
+    if question_text is None:
+        return answer_text
+    return f"Question: {question_text}\nAnswer: {answer_text}"
+
+
 def _to_pgvector(vector: Sequence[float]) -> str:
     return "[" + ",".join(format(value, ".17g") for value in vector) + "]"
 
@@ -72,21 +82,32 @@ async def process_next_input(
             if input_id is None:
                 original = await connection.fetchrow(
                     """
-                    SELECT id, original_text
-                    FROM original_inputs
-                    WHERE status = 'ready_for_embedding'
-                    ORDER BY id
-                    FOR UPDATE SKIP LOCKED
+                    SELECT
+                        inputs.id,
+                        inputs.original_text,
+                        questions.question_text
+                    FROM original_inputs AS inputs
+                    LEFT JOIN questions
+                        ON questions.id = inputs.question_id
+                    WHERE inputs.status = 'ready_for_embedding'
+                    ORDER BY inputs.id
+                    FOR UPDATE OF inputs SKIP LOCKED
                     LIMIT 1
                     """
                 )
             else:
                 original = await connection.fetchrow(
                     """
-                    SELECT id, original_text
-                    FROM original_inputs
-                    WHERE id = $1 AND status = 'ready_for_embedding'
-                    FOR UPDATE
+                    SELECT
+                        inputs.id,
+                        inputs.original_text,
+                        questions.question_text
+                    FROM original_inputs AS inputs
+                    LEFT JOIN questions
+                        ON questions.id = inputs.question_id
+                    WHERE inputs.id = $1
+                        AND inputs.status = 'ready_for_embedding'
+                    FOR UPDATE OF inputs
                     """,
                     input_id,
                 )
@@ -103,9 +124,24 @@ async def process_next_input(
                 original["id"],
             )
 
-            texts = [original["original_text"]]
-            texts.extend(segment["segment_text"] for segment in segments)
+            question_text = original["question_text"]
+            texts = [
+                build_embedding_input(
+                    answer_text=original["original_text"],
+                    question_text=question_text,
+                )
+            ]
+            texts.extend(
+                build_embedding_input(
+                    answer_text=segment["segment_text"],
+                    question_text=question_text,
+                )
+                for segment in segments
+            )
             embeddings = await _embed_in_batches(embedder, texts, batch_size)
+            embedding_representation = (
+                "answer-only" if question_text is None else "question-answer"
+            )
 
             embedding_rows = [
                 (
@@ -113,6 +149,7 @@ async def process_next_input(
                     None,
                     _to_pgvector(embeddings[0]),
                     embedding_model,
+                    embedding_representation,
                 )
             ]
             embedding_rows.extend(
@@ -121,6 +158,7 @@ async def process_next_input(
                     segment["id"],
                     _to_pgvector(vector),
                     embedding_model,
+                    embedding_representation,
                 )
                 for segment, vector in zip(
                     segments,
@@ -135,9 +173,10 @@ async def process_next_input(
                     original_input_id,
                     segment_input_id,
                     embedding,
-                    embedding_model
+                    embedding_model,
+                    embedding_representation
                 )
-                VALUES ($1, $2, $3::vector, $4)
+                VALUES ($1, $2, $3::vector, $4, $5)
                 """,
                 embedding_rows,
             )

@@ -6,6 +6,7 @@ from triage_processor.clients.ollama import OllamaEmbeddingClient
 from triage_processor.workers.embeddings import (
     _embed_in_batches,
     _to_pgvector,
+    build_embedding_input,
     process_next_input,
 )
 
@@ -97,7 +98,11 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_embeds_original_and_segments_in_small_batches(self):
         connection = FakeConnection(
-            {"id": 10, "original_text": "Full input"},
+            {
+                "id": 10,
+                "original_text": "Full input",
+                "question_text": None,
+            },
             [
                 {"id": 21, "segment_text": "First segment"},
                 {"id": 22, "segment_text": "Second segment"},
@@ -133,16 +138,22 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             connection.embedding_rows,
             [
-                (10, None, "[1,2]", "embeddinggemma"),
-                (None, 21, "[3,4]", "embeddinggemma"),
-                (None, 22, "[5,6]", "embeddinggemma"),
-                (None, 23, "[7,8]", "embeddinggemma"),
+                (10, None, "[1,2]", "embeddinggemma", "answer-only"),
+                (None, 21, "[3,4]", "embeddinggemma", "answer-only"),
+                (None, 22, "[5,6]", "embeddinggemma", "answer-only"),
+                (None, 23, "[7,8]", "embeddinggemma", "answer-only"),
             ],
         )
         self.assertEqual(connection.executed, [(10,)])
 
     async def test_input_without_segments_gets_original_embedding(self):
-        connection = FakeConnection({"id": 11, "original_text": "One topic"})
+        connection = FakeConnection(
+            {
+                "id": 11,
+                "original_text": "One topic",
+                "question_text": None,
+            }
+        )
         embedder = FakeEmbedder({"One topic": [0.25, -0.5]})
 
         processed = await process_next_input(
@@ -155,9 +166,119 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(processed)
         self.assertEqual(
             connection.embedding_rows,
-            [(11, None, "[0.25,-0.5]", "embeddinggemma")],
+            [
+                (
+                    11,
+                    None,
+                    "[0.25,-0.5]",
+                    "embeddinggemma",
+                    "answer-only",
+                )
+            ],
         )
         self.assertEqual(connection.executed, [(11,)])
+
+    async def test_contextual_input_and_segments_include_question_text(self):
+        question_text = "What prevented your purchase?"
+        original = {
+            "id": 12,
+            "original_text": "Price",
+            "question_text": question_text,
+        }
+        segments = [{"id": 24, "segment_text": "Too expensive"}]
+        connection = FakeConnection(
+            original,
+            segments,
+        )
+        contextual_original = (
+            "Question: What prevented your purchase?\nAnswer: Price"
+        )
+        contextual_segment = (
+            "Question: What prevented your purchase?\nAnswer: Too expensive"
+        )
+        embedder = FakeEmbedder(
+            {
+                contextual_original: [1.0, 2.0],
+                contextual_segment: [3.0, 4.0],
+            }
+        )
+
+        processed = await process_next_input(
+            FakePool(connection),
+            embedder,
+            batch_size=4,
+            embedding_model="embeddinggemma",
+        )
+
+        self.assertTrue(processed)
+        self.assertEqual(
+            embedder.calls,
+            [[contextual_original, contextual_segment]],
+        )
+        self.assertEqual(
+            connection.embedding_rows,
+            [
+                (
+                    12,
+                    None,
+                    "[1,2]",
+                    "embeddinggemma",
+                    "question-answer",
+                ),
+                (
+                    None,
+                    24,
+                    "[3,4]",
+                    "embeddinggemma",
+                    "question-answer",
+                ),
+            ],
+        )
+        self.assertEqual(original["original_text"], "Price")
+        self.assertEqual(segments[0]["segment_text"], "Too expensive")
+
+    async def test_identical_answer_uses_different_contextual_embedding(self):
+        contextual_text = (
+            "Question: What prevented your purchase?\nAnswer: Price"
+        )
+        embedder = FakeEmbedder(
+            {
+                "Price": [1.0, 0.0],
+                contextual_text: [0.0, 1.0],
+            }
+        )
+        generic_connection = FakeConnection(
+            {
+                "id": 13,
+                "original_text": "Price",
+                "question_text": None,
+            }
+        )
+        contextual_connection = FakeConnection(
+            {
+                "id": 14,
+                "original_text": "Price",
+                "question_text": "What prevented your purchase?",
+            }
+        )
+
+        await process_next_input(
+            FakePool(generic_connection),
+            embedder,
+            batch_size=4,
+            embedding_model="embeddinggemma",
+        )
+        await process_next_input(
+            FakePool(contextual_connection),
+            embedder,
+            batch_size=4,
+            embedding_model="embeddinggemma",
+        )
+
+        self.assertNotEqual(
+            generic_connection.embedding_rows[0][2],
+            contextual_connection.embedding_rows[0][2],
+        )
 
     async def test_no_ready_input_does_nothing(self):
         connection = FakeConnection(None)
@@ -177,7 +298,11 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ollama_failure_produces_no_database_writes(self):
         connection = FakeConnection(
-            {"id": 12, "original_text": "Full"},
+            {
+                "id": 12,
+                "original_text": "Full",
+                "question_text": None,
+            },
             [{"id": 24, "segment_text": "Segment"}],
         )
         embedder = FakeEmbedder(
@@ -216,6 +341,31 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
 
     def test_pgvector_serialization(self):
         self.assertEqual(_to_pgvector([0.1, -2.5, 3.0]), "[0.10000000000000001,-2.5,3]")
+
+    def test_build_embedding_input_keeps_generic_answer_unchanged(self):
+        self.assertEqual(
+            build_embedding_input(
+                answer_text="No",
+                question_text=None,
+            ),
+            "No",
+        )
+
+    def test_build_embedding_input_distinguishes_question_context(self):
+        purchase = build_embedding_input(
+            answer_text="No",
+            question_text="Did you complete your purchase?",
+        )
+        recommendation = build_embedding_input(
+            answer_text="No",
+            question_text="Would you recommend this product?",
+        )
+
+        self.assertNotEqual(purchase, recommendation)
+        self.assertEqual(
+            purchase,
+            "Question: Did you complete your purchase?\nAnswer: No",
+        )
 
 
 if __name__ == "__main__":

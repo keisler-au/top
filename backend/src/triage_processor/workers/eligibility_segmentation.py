@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 import logging
 import os
 from typing import Annotated, Protocol
@@ -23,12 +24,20 @@ Return JSON with this exact shape:
 
 Eligibility:
 - Eligible text contains meaningful content that can be organised by topic.
+- Evaluate the answer in the context of question_text when it is supplied.
+- A short or closed-form answer is meaningful when it directly answers the
+  supplied question. For example, "No" can answer a yes/no question and "Price"
+  can answer a question about a purchase barrier.
 - Ineligible text is spam, meaningless, purely administrative, or has no useful
   topical content.
+- Blank, spam, or non-responsive answers remain ineligible even when
+  question_text is supplied.
 
 Segmentation:
 - Only segment eligible text when it contains two or more distinct topics.
-- Preserve the meaning and wording of the source text.
+- Preserve the meaning and wording of answer_text.
+- Segments must contain only content from answer_text. Never copy or inject
+  question_text into a segment.
 - Segments must be self-contained, non-overlapping, and follow source order.
 - Return an empty segments array when no split is needed or the text is ineligible.
 - Return JSON only, without Markdown or commentary.
@@ -51,7 +60,11 @@ class SegmentationDecision(BaseModel):
 
 
 class EligibilitySegmenter(Protocol):
-    async def classify(self, original_text: str) -> SegmentationDecision: ...
+    async def classify(
+        self,
+        answer_text: str,
+        question_text: str | None = None,
+    ) -> SegmentationDecision: ...
 
 
 class LocalLLMClient:
@@ -70,10 +83,18 @@ class LocalLLMClient:
             timeout_seconds=timeout_seconds,
         )
 
-    async def classify(self, original_text: str) -> SegmentationDecision:
+    async def classify(
+        self,
+        answer_text: str,
+        question_text: str | None = None,
+    ) -> SegmentationDecision:
+        context = {"answer_text": answer_text}
+        if question_text is not None:
+            context["question_text"] = question_text
+
         result = await self._client.complete(
             system_prompt=SYSTEM_PROMPT,
-            user_content=original_text,
+            user_content=json.dumps(context, ensure_ascii=False),
         )
         return SegmentationDecision.model_validate(result)
 
@@ -92,21 +113,31 @@ async def process_next_input(
             if input_id is None:
                 row = await connection.fetchrow(
                     """
-                    SELECT id, original_text
-                    FROM original_inputs
-                    WHERE status = 'new'
-                    ORDER BY id
-                    FOR UPDATE SKIP LOCKED
+                    SELECT
+                        inputs.id,
+                        inputs.original_text,
+                        questions.question_text
+                    FROM original_inputs AS inputs
+                    LEFT JOIN questions
+                        ON questions.id = inputs.question_id
+                    WHERE inputs.status = 'new'
+                    ORDER BY inputs.id
+                    FOR UPDATE OF inputs SKIP LOCKED
                     LIMIT 1
                     """
                 )
             else:
                 row = await connection.fetchrow(
                     """
-                    SELECT id, original_text
-                    FROM original_inputs
-                    WHERE id = $1 AND status = 'new'
-                    FOR UPDATE
+                    SELECT
+                        inputs.id,
+                        inputs.original_text,
+                        questions.question_text
+                    FROM original_inputs AS inputs
+                    LEFT JOIN questions
+                        ON questions.id = inputs.question_id
+                    WHERE inputs.id = $1 AND inputs.status = 'new'
+                    FOR UPDATE OF inputs
                     """,
                     input_id,
                 )
@@ -114,7 +145,14 @@ async def process_next_input(
                 return False
 
             input_id = row["id"]
-            decision = await segmenter.classify(row["original_text"])
+            question_text = row.get("question_text")
+            if question_text is None:
+                decision = await segmenter.classify(row["original_text"])
+            else:
+                decision = await segmenter.classify(
+                    row["original_text"],
+                    question_text,
+                )
 
             if decision.eligible and decision.segments:
                 await connection.executemany(

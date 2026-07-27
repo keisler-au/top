@@ -25,7 +25,8 @@ Input received
 → full-input and segment embeddings
 → similarity search
 → topic assignment
-→ theme identification
+→ topic-level theme inference
+→ theme materialization
 ```
 
 ## Worker responsibilities
@@ -63,11 +64,11 @@ Processes embedded inputs.
 
 Runs from queued completion events across completed inputs.
 
-* Group related segments using embeddings and topics.
+* Aggregate complete, case-insensitive membership for each topic.
 * Retrieve relevant existing themes.
 * Ask the LLM to reuse, update, merge or create themes.
 * Link themes to relevant topics and supporting inputs.
-* Save final suggestion records with their topics and supporting inputs.
+* Materialize suggestions into live themes and topic links.
 
 ## Key distinction
 
@@ -77,6 +78,17 @@ Theme = what multiple related inputs are collectively saying
 ```
 
 Topics and themes are stored separately but linked because their relationship may be many-to-many.
+
+Question context is normalized in the immutable `questions` table. The
+identity `(source, form_key, question_key, question_version)` preserves the
+exact question wording used to interpret an answer. Contextual answers embed
+the question and answer together; generic inputs retain answer-only behavior.
+
+Topics are fine-grained and question-aware. Themes are global abstractions
+over complete topic membership, not clusters of raw answer embeddings.
+Suggestion rows preserve the model's audit trail, while `themes` and
+`theme_topics` represent live state. Merged themes remain as alias rows whose
+`merged_into_id` points directly to a canonical live theme.
 
 ## Design principles
 
@@ -129,6 +141,22 @@ Run the API locally with:
 cd backend
 uv run uvicorn triage_processor.api.main:app --reload
 ```
+
+### Input retrieval
+
+`GET /inputs` supports form, question, and submission retrieval. Question and
+submission filters are scoped by both `source` and `form_key`; omitting
+`question_version` returns every version of the selected question. Results
+include resolved question context and all canonical themes linked through the
+answer's original or segment topics.
+
+The endpoint uses deterministic `id` ordering with `offset`/`limit`
+pagination. The default limit is 50, the maximum limit is 100, and offset is
+bounded at 100,000. This deliberately simple pagination model matches the
+system's low-throughput workload.
+
+See [Database inspection queries](docs/database-inspection.md) for question,
+submission, suggestion-materialization, and answer-to-theme SQL examples.
 
 ## Run the full stack with Docker Compose
 
@@ -237,12 +265,19 @@ With the Compose stack running, use the interactive runner to submit sample
 inputs and inspect their stored pipeline results:
 
 ```bash
-python3 scripts/manual_test.py
+python3 infrastructure/postgres/manual_test.py
 ```
 
 Each invocation creates a unique source tag. To inspect a previous run, copy
 the source shown in its menu and pass it explicitly:
 
 ```bash
-python3 scripts/manual_test.py --source manual-20260726-143000
+python3 infrastructure/postgres/manual_test.py \
+  --source manual-20260726-143000
 ```
+
+The runner includes generic inputs and contextual fixtures for short and long
+answers, identical text under different questions, related answers, and
+multi-answer submissions. Its inspection menu shows pending/materialized
+suggestions and the full form → question → submission → answer → topic →
+canonical themes chain.

@@ -5,6 +5,44 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
+CREATE TABLE IF NOT EXISTS questions (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    source TEXT NOT NULL
+        CONSTRAINT questions_source_nonempty CHECK (btrim(source) <> ''),
+    form_key TEXT NOT NULL
+        CONSTRAINT questions_form_key_nonempty CHECK (btrim(form_key) <> ''),
+    question_key TEXT NOT NULL
+        CONSTRAINT questions_question_key_nonempty
+        CHECK (btrim(question_key) <> ''),
+    question_version INTEGER NOT NULL DEFAULT 1
+        CONSTRAINT questions_version_positive CHECK (question_version >= 1),
+    question_text TEXT NOT NULL
+        CONSTRAINT questions_text_nonempty CHECK (btrim(question_text) <> ''),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT questions_identity_unique
+        UNIQUE (source, form_key, question_key, question_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_questions_source_form
+    ON questions (source, form_key);
+
+CREATE OR REPLACE FUNCTION reject_question_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION
+        'questions rows are immutable; insert a new question_version instead';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS questions_immutable ON questions;
+
+CREATE TRIGGER questions_immutable
+BEFORE UPDATE ON questions
+FOR EACH ROW
+EXECUTE FUNCTION reject_question_mutation();
+
 CREATE TABLE IF NOT EXISTS original_inputs (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     original_text TEXT NOT NULL
@@ -30,6 +68,11 @@ CREATE TABLE IF NOT EXISTS original_inputs (
             topic IS NULL
             OR (btrim(topic) <> '' AND char_length(topic) <= 120)
         ),
+    question_id BIGINT
+        REFERENCES questions (id) ON DELETE RESTRICT,
+    submission_key TEXT
+        CONSTRAINT original_inputs_submission_key_nonempty
+        CHECK (submission_key IS NULL OR btrim(submission_key) <> ''),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT original_inputs_completed_has_topic
         CHECK (status <> 'completed' OR topic IS NOT NULL)
@@ -50,6 +93,34 @@ CREATE INDEX IF NOT EXISTS idx_original_inputs_ready_for_analysis
 CREATE INDEX IF NOT EXISTS idx_original_inputs_completed
     ON original_inputs (id)
     WHERE status = 'completed';
+
+CREATE INDEX IF NOT EXISTS idx_original_inputs_question_id
+    ON original_inputs (question_id)
+    WHERE question_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_original_inputs_submission_key
+    ON original_inputs (submission_key)
+    WHERE submission_key IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION reject_question_id_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.question_id IS DISTINCT FROM NEW.question_id THEN
+        RAISE EXCEPTION 'original_inputs.question_id is immutable once set';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS original_inputs_question_id_immutable
+    ON original_inputs;
+
+CREATE TRIGGER original_inputs_question_id_immutable
+BEFORE UPDATE ON original_inputs
+FOR EACH ROW
+EXECUTE FUNCTION reject_question_id_mutation();
 
 CREATE TABLE IF NOT EXISTS segment_inputs (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -82,6 +153,9 @@ CREATE TABLE IF NOT EXISTS input_embeddings (
     embedding_model TEXT NOT NULL
         CONSTRAINT input_embeddings_model_nonempty
         CHECK (btrim(embedding_model) <> ''),
+    embedding_representation TEXT NOT NULL DEFAULT 'answer-only'
+        CONSTRAINT input_embeddings_representation_nonempty
+        CHECK (btrim(embedding_representation) <> ''),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT input_embeddings_exactly_one_target
         CHECK (num_nonnulls(original_input_id, segment_input_id) = 1),
@@ -99,12 +173,19 @@ CREATE TABLE IF NOT EXISTS themes (
     description TEXT
         CONSTRAINT themes_description_length
         CHECK (description IS NULL OR char_length(description) <= 2000),
+    merged_into_id BIGINT
+        REFERENCES themes (id) ON DELETE SET NULL
+        CONSTRAINT themes_not_self_merged CHECK (merged_into_id <> id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_themes_name_case_insensitive
     ON themes (lower(name));
+
+CREATE INDEX IF NOT EXISTS idx_themes_merged_into
+    ON themes (merged_into_id)
+    WHERE merged_into_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS theme_topics (
     theme_id BIGINT NOT NULL
@@ -141,8 +222,24 @@ CREATE TABLE IF NOT EXISTS theme_suggestions (
     group_fingerprint TEXT NOT NULL UNIQUE
         CONSTRAINT theme_suggestions_fingerprint_valid
         CHECK (group_fingerprint ~ '^[0-9a-f]{64}$'),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    materialized_theme_id BIGINT
+        REFERENCES themes (id) ON DELETE RESTRICT,
+    materialized_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT theme_suggestions_materialization_consistent
+        CHECK (
+            (materialized_theme_id IS NULL AND materialized_at IS NULL)
+            OR
+            (
+                materialized_theme_id IS NOT NULL
+                AND materialized_at IS NOT NULL
+            )
+        )
 );
+
+CREATE INDEX IF NOT EXISTS idx_theme_suggestions_unmaterialized
+    ON theme_suggestions (id)
+    WHERE materialized_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS theme_suggestion_existing_themes (
     suggestion_id BIGINT NOT NULL
@@ -282,5 +379,6 @@ VALUES
     ('006_add_theme_management.sql'),
     ('007_align_worker_contracts.sql'),
     ('008_add_worker_jobs.sql'),
-    ('009_remove_theme_suggestion_review.sql')
+    ('009_remove_theme_suggestion_review.sql'),
+    ('010_normalize_question_context.sql')
 ON CONFLICT DO NOTHING;

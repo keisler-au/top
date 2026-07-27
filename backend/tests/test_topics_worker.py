@@ -1,5 +1,6 @@
 import unittest
 
+from triage_processor.workers.low_information import is_low_information
 from triage_processor.workers.topics import (
     LocalTopicLLMClient,
     SegmentTopicAssignment,
@@ -36,6 +37,7 @@ class FakeConnection:
         self.executed = []
         self.segment_updates = []
         self.fetchrow_values = []
+        self.evidence_requests = []
 
     def transaction(self):
         return AsyncContext(None)
@@ -48,7 +50,17 @@ class FakeConnection:
         if "COUNT(*) AS usage_count" in query:
             return self.topics
         if "embeddings.embedding <=>" in query:
-            return self.evidence.get(values[0], [])
+            if "evidence_inputs.question_id = $4" in query:
+                scope = "same_question"
+            elif "evidence_inputs.question_id IS DISTINCT FROM $4" in query:
+                scope = "other_questions"
+            else:
+                scope = "global"
+            self.evidence_requests.append((values[0], scope, values))
+            return self.evidence.get(
+                (values[0], scope),
+                self.evidence.get(values[0], []),
+            )
         return self.segments
 
     async def execute(self, query, *values):
@@ -160,12 +172,199 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             ["Housing", "Transport"],
         )
         self.assertNotIn("embedding", assigner.context["targets"][0])
+        self.assertIsNone(assigner.context["targets"][0]["question_text"])
+        self.assertEqual(
+            assigner.context["targets"][0]["similar_segments"][0]["scope"],
+            "global",
+        )
         self.assertEqual(connection.executed[0][1], (10, "Housing"))
         self.assertEqual(
             connection.segment_updates,
             [(20, "Public transport")],
         )
         self.assertEqual(connection.executed[-1][1], (10,))
+
+    async def test_contextual_price_can_receive_barrier_topic(self):
+        question_text = "What is the biggest barrier to purchasing?"
+        connection = FakeConnection(
+            original={
+                "id": 16,
+                "original_text": "Price",
+                "question_id": 101,
+                "question_text": question_text,
+                "embedding": "[1,0]",
+                "embedding_model": "embeddinggemma",
+            },
+            segments=[
+                {
+                    "id": 26,
+                    "segment_text": "Upfront cost",
+                    "embedding": "[0,1]",
+                    "embedding_model": "embeddinggemma",
+                }
+            ],
+            evidence={
+                ("[1,0]", "same_question"): [],
+                ("[0,1]", "same_question"): [],
+                ("[1,0]", "other_questions"): [
+                    {
+                        "id": 35,
+                        "segment_text": "Price",
+                        "topic": "Product Pricing",
+                        "distance": 0.01,
+                    }
+                ],
+            },
+        )
+        assigner = FakeAssigner(
+            TopicDecision(
+                original_topic=TopicChoice(
+                    name="Purchase Barriers",
+                    reused_existing=False,
+                ),
+                segment_topics=[
+                    SegmentTopicAssignment(
+                        segment_id=26,
+                        topic=TopicChoice(
+                            name="Purchase Barriers",
+                            reused_existing=False,
+                        ),
+                    )
+                ],
+            )
+        )
+
+        processed = await process_next_input(
+            FakePool(connection),
+            assigner,
+            similar_limit=5,
+            topic_limit=50,
+        )
+
+        self.assertTrue(processed)
+        self.assertEqual(
+            [
+                target["question_text"]
+                for target in assigner.context["targets"]
+            ],
+            [question_text, question_text],
+        )
+        self.assertEqual(
+            assigner.context["targets"][0]["similar_segments"],
+            [],
+        )
+        self.assertEqual(
+            [request[1] for request in connection.evidence_requests],
+            ["same_question", "same_question"],
+        )
+        self.assertEqual(
+            connection.executed[0][1],
+            (16, "Purchase Barriers"),
+        )
+
+    async def test_low_information_context_does_not_use_global_evidence(self):
+        connection = FakeConnection(
+            original={
+                "id": 17,
+                "original_text": "No",
+                "question_id": 102,
+                "question_text": "Would you recommend this product?",
+                "embedding": "[0,1]",
+                "embedding_model": "embeddinggemma",
+            },
+            evidence={
+                ("[0,1]", "same_question"): [],
+                ("[0,1]", "other_questions"): [
+                    {
+                        "id": 36,
+                        "segment_text": "No",
+                        "topic": "Purchase Intent",
+                        "distance": 0.01,
+                    }
+                ],
+            },
+        )
+        assigner = FakeAssigner(
+            TopicDecision(
+                original_topic=TopicChoice(
+                    name="Recommendations",
+                    reused_existing=False,
+                )
+            )
+        )
+
+        await process_next_input(
+            FakePool(connection),
+            assigner,
+            similar_limit=5,
+            topic_limit=50,
+        )
+
+        self.assertEqual(
+            assigner.context["targets"][0]["similar_segments"],
+            [],
+        )
+        self.assertEqual(len(connection.evidence_requests), 1)
+        self.assertEqual(
+            connection.evidence_requests[0][1],
+            "same_question",
+        )
+
+    async def test_rich_context_uses_same_question_then_global_evidence(self):
+        connection = FakeConnection(
+            original={
+                "id": 18,
+                "original_text": "The checkout process was confusing",
+                "question_id": 103,
+                "question_text": "What could we improve?",
+                "embedding": "[1,1]",
+                "embedding_model": "embeddinggemma",
+            },
+            evidence={
+                ("[1,1]", "same_question"): [
+                    {
+                        "id": 37,
+                        "segment_text": "Checkout was difficult",
+                        "topic": "Checkout Experience",
+                        "distance": 0.05,
+                    }
+                ],
+                ("[1,1]", "other_questions"): [
+                    {
+                        "id": 38,
+                        "segment_text": "Confusing payment flow",
+                        "topic": "Payment Experience",
+                        "distance": 0.1,
+                    }
+                ],
+            },
+        )
+        assigner = FakeAssigner(
+            TopicDecision(
+                original_topic=TopicChoice(
+                    name="Checkout Experience",
+                    reused_existing=True,
+                )
+            )
+        )
+
+        await process_next_input(
+            FakePool(connection),
+            assigner,
+            similar_limit=2,
+            topic_limit=50,
+        )
+
+        evidence = assigner.context["targets"][0]["similar_segments"]
+        self.assertEqual(
+            [item["scope"] for item in evidence],
+            ["same_question", "global"],
+        )
+        self.assertEqual(
+            [request[1] for request in connection.evidence_requests],
+            ["same_question", "other_questions"],
+        )
+        self.assertEqual(connection.evidence_requests[1][2][-1], 1)
 
     async def test_input_without_segments_gets_original_topic(self):
         connection = FakeConnection(
@@ -340,6 +539,12 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(processed)
         self.assertEqual(connection.executed, [])
+
+    def test_low_information_defaults(self):
+        self.assertTrue(is_low_information(" No "))
+        self.assertTrue(is_low_information("Price"))
+        self.assertFalse(is_low_information("123456789012345"))
+        self.assertFalse(is_low_information("A detailed response"))
 
 
 if __name__ == "__main__":
