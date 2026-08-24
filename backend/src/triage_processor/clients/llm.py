@@ -37,6 +37,8 @@ class StructuredChatClient:
                     {"role": "user", "content": user_content},
                 ],
                 "temperature": 0,
+                "reasoning_effort": "none",
+                "max_tokens": 512,
                 "response_format": {"type": "json_object"},
             },
         )

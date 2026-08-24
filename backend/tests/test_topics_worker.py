@@ -38,6 +38,7 @@ class FakeConnection:
         self.segment_updates = []
         self.fetchrow_values = []
         self.evidence_requests = []
+        self.evidence_queries = []
 
     def transaction(self):
         return AsyncContext(None)
@@ -49,7 +50,7 @@ class FakeConnection:
     async def fetch(self, query, *values):
         if "COUNT(*) AS usage_count" in query:
             return self.topics
-        if "embeddings.embedding <=>" in query:
+        if "<=> $1::vector" in query:
             if "evidence_inputs.question_id = $4" in query:
                 scope = "same_question"
             elif "evidence_inputs.question_id IS DISTINCT FROM $4" in query:
@@ -57,6 +58,7 @@ class FakeConnection:
             else:
                 scope = "global"
             self.evidence_requests.append((values[0], scope, values))
+            self.evidence_queries.append(query)
             return self.evidence.get(
                 (values[0], scope),
                 self.evidence.get(values[0], []),
@@ -119,16 +121,18 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             evidence={
                 "[1,0]": [
                     {
-                        "id": 30,
-                        "segment_text": "Affordable homes",
+                        "evidence_type": "original",
+                        "evidence_id": 30,
+                        "text": "Affordable homes",
                         "topic": "Housing",
                         "distance": 0.1,
                     }
                 ],
                 "[0,1]": [
                     {
-                        "id": 31,
-                        "segment_text": "Bus routes",
+                        "evidence_type": "segment",
+                        "evidence_id": 31,
+                        "text": "Bus routes",
                         "topic": "Transport",
                         "distance": 0.2,
                     }
@@ -174,9 +178,20 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("embedding", assigner.context["targets"][0])
         self.assertIsNone(assigner.context["targets"][0]["question_text"])
         self.assertEqual(
-            assigner.context["targets"][0]["similar_segments"][0]["scope"],
+            assigner.context["targets"][0]["similar_evidence"][0]["scope"],
             "global",
         )
+        self.assertEqual(
+            assigner.context["targets"][0]["similar_evidence"][0][
+                "evidence_type"
+            ],
+            "original",
+        )
+        self.assertIn(
+            "JOIN original_inputs AS unsegmented_inputs",
+            connection.evidence_queries[0],
+        )
+        self.assertIn("WHERE NOT EXISTS", connection.evidence_queries[0])
         self.assertEqual(connection.executed[0][1], (10, "Housing"))
         self.assertEqual(
             connection.segment_updates,
@@ -208,8 +223,9 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
                 ("[0,1]", "same_question"): [],
                 ("[1,0]", "other_questions"): [
                     {
-                        "id": 35,
-                        "segment_text": "Price",
+                        "evidence_type": "original",
+                        "evidence_id": 35,
+                        "text": "Price",
                         "topic": "Product Pricing",
                         "distance": 0.01,
                     }
@@ -250,7 +266,7 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             [question_text, question_text],
         )
         self.assertEqual(
-            assigner.context["targets"][0]["similar_segments"],
+            assigner.context["targets"][0]["similar_evidence"],
             [],
         )
         self.assertEqual(
@@ -276,8 +292,9 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
                 ("[0,1]", "same_question"): [],
                 ("[0,1]", "other_questions"): [
                     {
-                        "id": 36,
-                        "segment_text": "No",
+                        "evidence_type": "original",
+                        "evidence_id": 36,
+                        "text": "No",
                         "topic": "Purchase Intent",
                         "distance": 0.01,
                     }
@@ -301,7 +318,7 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(
-            assigner.context["targets"][0]["similar_segments"],
+            assigner.context["targets"][0]["similar_evidence"],
             [],
         )
         self.assertEqual(len(connection.evidence_requests), 1)
@@ -323,16 +340,18 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             evidence={
                 ("[1,1]", "same_question"): [
                     {
-                        "id": 37,
-                        "segment_text": "Checkout was difficult",
+                        "evidence_type": "original",
+                        "evidence_id": 37,
+                        "text": "Checkout was difficult",
                         "topic": "Checkout Experience",
                         "distance": 0.05,
                     }
                 ],
                 ("[1,1]", "other_questions"): [
                     {
-                        "id": 38,
-                        "segment_text": "Confusing payment flow",
+                        "evidence_type": "segment",
+                        "evidence_id": 38,
+                        "text": "Confusing payment flow",
                         "topic": "Payment Experience",
                         "distance": 0.1,
                     }
@@ -355,7 +374,7 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             topic_limit=50,
         )
 
-        evidence = assigner.context["targets"][0]["similar_segments"]
+        evidence = assigner.context["targets"][0]["similar_evidence"]
         self.assertEqual(
             [item["scope"] for item in evidence],
             ["same_question", "global"],
@@ -380,7 +399,16 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
                 original_topic=TopicChoice(
                     name="Libraries",
                     reused_existing=False,
-                )
+                ),
+                segment_topics=[
+                    SegmentTopicAssignment(
+                        segment_id=999,
+                        topic=TopicChoice(
+                            name="Irrelevant segment",
+                            reused_existing=False,
+                        ),
+                    )
+                ],
             )
         )
 
@@ -497,7 +525,7 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.executed, [])
         self.assertEqual(connection.segment_updates, [])
 
-    async def test_unknown_reused_topic_is_rejected(self):
+    async def test_unknown_reused_topic_becomes_a_new_topic(self):
         connection = FakeConnection(
             original={
                 "id": 14,
@@ -516,15 +544,14 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        with self.assertRaisesRegex(ValueError, "unknown topic"):
-            await process_next_input(
-                FakePool(connection),
-                assigner,
-                similar_limit=5,
-                topic_limit=50,
-            )
+        await process_next_input(
+            FakePool(connection),
+            assigner,
+            similar_limit=5,
+            topic_limit=50,
+        )
 
-        self.assertEqual(connection.executed, [])
+        self.assertEqual(connection.executed[0][1], (14, "Unknown"))
 
     async def test_no_ready_input_does_nothing(self):
         connection = FakeConnection(original=None)

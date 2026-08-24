@@ -55,7 +55,8 @@ The embedding model does not access the database directly.
 
 Processes embedded inputs.
 
-* Find similar existing segments using pgvector.
+* Find similar evidence using pgvector: segments from split answers and the
+  complete originals of answers that did not need segmentation.
 * Retrieve relevant existing topics.
 * Ask the LLM to reuse an existing topic or suggest a new one.
 * Save topic assignments and mark the input complete.
@@ -123,7 +124,9 @@ Suggestion rows preserve the model's audit trail, while `themes` and
 
 The `frontend` directory is intentionally empty. See
 [Architecture](docs/architecture.md) for the backend responsibility boundaries
-and [Worker queue](docs/worker-queue.md) for queue operations.
+and [Worker queue](docs/worker-queue.md) for queue operations. The optional
+[Google Sheets importer](docs/google-sheets.md) polls registered Google Form
+response sheets without requiring a public webhook.
 
 ## Backend development
 
@@ -168,7 +171,7 @@ docker compose up --build
 ```
 
 On first startup, the `ollama-init` service downloads the default
-`qwen3:4b` chat model and `nomic-embed-text` embedding model before the workers
+`qwen3:4b-instruct` chat model and `nomic-embed-text` embedding model before the workers
 start. Model downloads are stored in the persistent `ollama_models` volume, so
 subsequent startups reuse them. The workers communicate with the Ollama
 container directly; no host Ollama process is required.
@@ -189,7 +192,7 @@ in their named volumes.
 Compose environment variables can override the defaults, for example:
 
 ```bash
-API_PORT=8080 LLM_MODEL=qwen3:4b docker compose up --build
+API_PORT=8080 LLM_MODEL=qwen3:4b-instruct docker compose up --build
 ```
 
 ## Worker queue

@@ -45,6 +45,8 @@ class StructuredChatClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["path"], "/v1/chat/completions")
         self.assertEqual(captured["authorization"], "Bearer secret")
         self.assertEqual(captured["body"]["model"], "local-model")
+        self.assertEqual(captured["body"]["reasoning_effort"], "none")
+        self.assertEqual(captured["body"]["max_tokens"], 512)
         self.assertEqual(
             captured["body"]["response_format"],
             {"type": "json_object"},

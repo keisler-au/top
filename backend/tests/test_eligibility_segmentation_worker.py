@@ -274,9 +274,13 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.inserted_segments, [])
         self.assertEqual(connection.executed, [])
 
-    def test_rejects_a_single_segment(self):
-        with self.assertRaises(ValueError):
-            SegmentationDecision(eligible=True, segments=["Only segment"])
+    def test_treats_a_single_segment_as_unsplit(self):
+        decision = SegmentationDecision(
+            eligible=True,
+            segments=["Only segment"],
+        )
+
+        self.assertEqual(decision.segments, [])
 
     def test_rejects_segments_for_ineligible_input(self):
         with self.assertRaises(ValueError):

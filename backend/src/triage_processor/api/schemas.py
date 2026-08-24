@@ -20,12 +20,14 @@ class QuestionContext(BaseModel):
     question_key: RequiredText
     question_version: Annotated[int, Field(ge=1)] = 1
     question_text: RequiredText
+    form_id: RequiredText | None = None
 
 
 class InputCreate(BaseModel):
     original_text: RequiredText
     source: RequiredText
     submission_key: RequiredText | None = None
+    source_record_key: RequiredText | None = None
     question_context: QuestionContext | None = None
 
     @model_validator(mode="after")
@@ -56,5 +58,6 @@ class InputResponse(BaseModel):
     question_id: int | None
     question_context: QuestionContext | None
     submission_key: str | None
+    source_record_key: str | None
     created_at: datetime
     themes: list[ThemeResponse] = Field(default_factory=list)

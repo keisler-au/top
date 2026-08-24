@@ -18,6 +18,7 @@ class ApiStructureTests(unittest.TestCase):
 class FakeDatabase:
     def __init__(self) -> None:
         self.questions: dict[tuple[Any, ...], dict[str, Any]] = {}
+        self.form_sources: dict[tuple[str, str], dict[str, Any]] = {}
         self.inputs: list[dict[str, Any]] = []
         self.next_question_id = 1
         self.next_input_id = 1
@@ -196,6 +197,16 @@ class FakeConnection:
                         if question is not None
                         else None
                     ),
+                    "form_source_id": (
+                        question.get("form_source_id")
+                        if question is not None
+                        else None
+                    ),
+                    "form_id": (
+                        question.get("form_id")
+                        if question is not None
+                        else None
+                    ),
                     "themes": themes,
                 }
             )
@@ -203,6 +214,9 @@ class FakeConnection:
 
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
         statement = " ".join(query.split())
+
+        if statement.startswith("SELECT id FROM form_sources"):
+            return copy.deepcopy(self.database.form_sources.get(tuple(args)))
 
         if statement.startswith("SELECT") and "FROM questions" in statement:
             identity = tuple(args[:4])
@@ -221,6 +235,8 @@ class FakeConnection:
                 "question_key": args[2],
                 "question_version": args[3],
                 "question_text": args[4],
+                "form_source_id": args[5],
+                "form_id": args[6],
             }
             self.database.next_question_id += 1
             self.database.questions[identity] = row
@@ -234,6 +250,20 @@ class FakeConnection:
             if self.database.fail_input_insert:
                 raise RuntimeError("simulated original_inputs constraint failure")
 
+            source_record_key = args[4]
+            if source_record_key is not None:
+                existing = next(
+                    (
+                        item
+                        for item in self.database.inputs
+                        if item["source"] == args[1]
+                        and item["source_record_key"] == source_record_key
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    return None
+
             row = {
                 "id": self.database.next_input_id,
                 "original_text": args[0],
@@ -242,11 +272,29 @@ class FakeConnection:
                 "topic": None,
                 "question_id": args[2],
                 "submission_key": args[3],
+                "source_record_key": source_record_key,
                 "created_at": datetime.now(UTC),
             }
             self.database.next_input_id += 1
             self.database.inputs.append(row)
             return copy.deepcopy(row)
+
+        if (
+            statement.startswith("SELECT")
+            and "FROM original_inputs" in statement
+            and "source_record_key = $2" in statement
+        ):
+            return copy.deepcopy(
+                next(
+                    (
+                        item
+                        for item in self.database.inputs
+                        if item["source"] == args[0]
+                        and item["source_record_key"] == args[1]
+                    ),
+                    None,
+                )
+            )
 
         raise AssertionError(f"Unexpected SQL: {statement}")
 
@@ -318,6 +366,7 @@ class InputApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(body["question_id"])
         self.assertIsNone(body["question_context"])
         self.assertIsNone(body["submission_key"])
+        self.assertIsNone(body["source_record_key"])
         self.assertEqual(body["themes"], [])
         self.assertEqual(self.database.transaction_entries, 1)
 
@@ -652,6 +701,61 @@ class InputApiTests(unittest.IsolatedAsyncioTestCase):
                     params=params,
                 )
                 self.assertEqual(response.status_code, 422)
+
+    async def test_registered_form_is_linked_and_source_record_is_idempotent(
+        self,
+    ) -> None:
+        self.database.form_sources[("google-sheets", "feedback-form")] = {
+            "id": 7
+        }
+        payload = {
+            "original_text": "The subscription is too expensive",
+            "source": "google-sheets",
+            "submission_key": "form-source:7:row:2",
+            "source_record_key": "form-source:7:row:2:column:2",
+            "question_context": {
+                "form_key": "feedback-form",
+                "form_id": "feedback-form",
+                "question_key": "header-price",
+                "question_text": "What prevents you from purchasing?",
+            },
+        }
+
+        first = await self.client.post("/inputs", json=payload)
+        replay = await self.client.post("/inputs", json=payload)
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(replay.status_code, 201)
+        self.assertEqual(first.json()["id"], replay.json()["id"])
+        self.assertEqual(len(self.database.inputs), 1)
+        self.assertEqual(first.json()["question_context"]["form_id"], "feedback-form")
+        question = next(iter(self.database.questions.values()))
+        self.assertEqual(question["form_source_id"], 7)
+
+        conflict = await self.client.post(
+            "/inputs",
+            json={**payload, "original_text": "Changed after import"},
+        )
+        self.assertEqual(conflict.status_code, 409)
+
+    async def test_registered_form_must_exist(self) -> None:
+        response = await self.client.post(
+            "/inputs",
+            json={
+                "original_text": "Answer",
+                "source": "google-sheets",
+                "submission_key": "row-2",
+                "source_record_key": "row-2-column-2",
+                "question_context": {
+                    "form_key": "missing-form",
+                    "form_id": "missing-form",
+                    "question_key": "header-question",
+                    "question_text": "Question",
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
 
 
 if __name__ == "__main__":

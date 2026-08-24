@@ -263,14 +263,14 @@ class ContextualPipelineFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             is_cluster_eligible(
                 clusters["Cost Barriers"],
-                min_rich_units=2,
+                min_rich_inputs=2,
                 min_distinct_questions_low_info=3,
             )
         )
         self.assertTrue(
             is_cluster_eligible(
                 clusters["Checkout Friction"],
-                min_rich_units=2,
+                min_rich_inputs=2,
                 min_distinct_questions_low_info=3,
             )
         )

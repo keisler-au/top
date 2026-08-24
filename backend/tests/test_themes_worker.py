@@ -386,7 +386,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
             [member.entity_id for member in clusters[0].member_units],
             [1, 3],
         )
-        self.assertEqual(clusters[0].rich_member_count, 2)
+        self.assertEqual(clusters[0].rich_input_count, 2)
 
     def test_low_information_cluster_needs_three_distinct_questions(self):
         members = [
@@ -404,7 +404,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             is_cluster_eligible(
                 cluster,
-                min_rich_units=2,
+                min_rich_inputs=2,
                 min_distinct_questions_low_info=3,
             )
         )
@@ -422,7 +422,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             is_cluster_eligible(
                 cluster,
-                min_rich_units=2,
+                min_rich_inputs=2,
                 min_distinct_questions_low_info=3,
             )
         )
@@ -436,13 +436,55 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
             ]
         )[0]
 
-        self.assertEqual(cluster.rich_member_count, 2)
+        self.assertEqual(cluster.rich_input_count, 2)
         self.assertTrue(
             is_cluster_eligible(
                 cluster,
-                min_rich_units=2,
+                min_rich_inputs=2,
                 min_distinct_questions_low_info=3,
             )
+        )
+
+    def test_original_and_segments_count_as_one_supporting_input(self):
+        cluster = build_topic_clusters(
+            [
+                unit(
+                    10,
+                    "Checkout",
+                    "Checkout was confusing and the payment form failed",
+                    entity_type="original",
+                    original_input_id=10,
+                ),
+                unit(
+                    20,
+                    "Checkout",
+                    "Checkout was confusing",
+                    entity_type="segment",
+                    original_input_id=10,
+                ),
+                unit(
+                    21,
+                    "Checkout",
+                    "The payment form failed",
+                    entity_type="segment",
+                    original_input_id=10,
+                ),
+            ]
+        )[0]
+
+        self.assertEqual(len(cluster.member_units), 3)
+        self.assertEqual(cluster.distinct_original_input_ids, frozenset({10}))
+        self.assertEqual(cluster.rich_input_count, 1)
+        self.assertFalse(
+            is_cluster_eligible(
+                cluster,
+                min_rich_inputs=2,
+                min_distinct_questions_low_info=3,
+            )
+        )
+        self.assertEqual(
+            sample_cluster_evidence(cluster, 5),
+            ["Checkout was confusing"],
         )
 
     def test_full_membership_fingerprint_is_stable_and_changes_for_new_member(self):
@@ -539,7 +581,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
             suggester,
             sample_evidence_limit=2,
             theme_limit=20,
-            min_rich_units=2,
+            min_rich_inputs=2,
             min_distinct_questions_low_info=3,
         )
 
@@ -555,7 +597,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
                         "The price is too high",
                         "It is too expensive for the value",
                     ],
-                    "member_count": 3,
+                    "input_count": 3,
                     "existing_themes": [],
                 }
             ],
@@ -601,7 +643,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
             suggester,
             sample_evidence_limit=5,
             theme_limit=20,
-            min_rich_units=2,
+            min_rich_inputs=2,
             min_distinct_questions_low_info=3,
         )
 
@@ -644,7 +686,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
             suggester,
             sample_evidence_limit=5,
             theme_limit=20,
-            min_rich_units=2,
+            min_rich_inputs=2,
             min_distinct_questions_low_info=3,
         )
 
@@ -696,7 +738,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
             suggester,
             sample_evidence_limit=5,
             theme_limit=20,
-            min_rich_units=2,
+            min_rich_inputs=2,
             min_distinct_questions_low_info=3,
         )
 
@@ -719,7 +761,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
             suggester,
             sample_evidence_limit=5,
             theme_limit=20,
-            min_rich_units=2,
+            min_rich_inputs=2,
             min_distinct_questions_low_info=3,
         )
 
@@ -741,7 +783,7 @@ class ThemeWorkerTests(unittest.IsolatedAsyncioTestCase):
                 suggester,
                 sample_evidence_limit=5,
                 theme_limit=20,
-                min_rich_units=2,
+                min_rich_inputs=2,
                 min_distinct_questions_low_info=3,
             )
 

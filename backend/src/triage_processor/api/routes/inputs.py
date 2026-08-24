@@ -21,6 +21,29 @@ async def resolve_question(
     source: str,
     question_context: QuestionContext,
 ) -> dict[str, Any]:
+    form_source_id = None
+    if question_context.form_id is not None:
+        form_source = await connection.fetchrow(
+            """
+            SELECT id
+            FROM form_sources
+            WHERE source = $1 AND form_id = $2
+            """,
+            source,
+            question_context.form_id,
+        )
+        if form_source is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="form_id is not registered for this source",
+            )
+        if question_context.form_key != question_context.form_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="form_key must match the registered form_id",
+            )
+        form_source_id = form_source["id"]
+
     identity_parameters = (
         source,
         question_context.form_key,
@@ -29,13 +52,22 @@ async def resolve_question(
     )
     row = await connection.fetchrow(
         """
-        SELECT id, form_key, question_key, question_version, question_text
+        SELECT
+            questions.id,
+            questions.form_key,
+            questions.question_key,
+            questions.question_version,
+            questions.question_text,
+            questions.form_source_id,
+            form_sources.form_id
         FROM questions
+        LEFT JOIN form_sources
+            ON form_sources.id = questions.form_source_id
         WHERE
-            source = $1
-            AND form_key = $2
-            AND question_key = $3
-            AND question_version = $4
+            questions.source = $1
+            AND questions.form_key = $2
+            AND questions.question_key = $3
+            AND questions.question_version = $4
         """,
         *identity_parameters,
     )
@@ -48,9 +80,10 @@ async def resolve_question(
                 form_key,
                 question_key,
                 question_version,
-                question_text
+                question_text,
+                form_source_id
             )
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (
                 source,
                 form_key,
@@ -62,27 +95,35 @@ async def resolve_question(
                 form_key,
                 question_key,
                 question_version,
-                question_text
+                question_text,
+                form_source_id,
+                $7::text AS form_id
             """,
             *identity_parameters,
             question_context.question_text,
+            form_source_id,
+            question_context.form_id,
         )
 
         if row is None:
             row = await connection.fetchrow(
                 """
                 SELECT
-                    id,
-                    form_key,
-                    question_key,
-                    question_version,
-                    question_text
+                    questions.id,
+                    questions.form_key,
+                    questions.question_key,
+                    questions.question_version,
+                    questions.question_text,
+                    questions.form_source_id,
+                    form_sources.form_id
                 FROM questions
+                LEFT JOIN form_sources
+                    ON form_sources.id = questions.form_source_id
                 WHERE
-                    source = $1
-                    AND form_key = $2
-                    AND question_key = $3
-                    AND question_version = $4
+                    questions.source = $1
+                    AND questions.form_key = $2
+                    AND questions.question_key = $3
+                    AND questions.question_version = $4
                 """,
                 *identity_parameters,
             )
@@ -98,6 +139,14 @@ async def resolve_question(
                 "question_text does not match the existing question identity; "
                 "increment question_version"
             ),
+        )
+    if (
+        question_context.form_id is not None
+        and resolved_question["form_source_id"] != form_source_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="question identity belongs to a different registered form",
         )
     return resolved_question
 
@@ -132,9 +181,13 @@ async def create_input(
                     original_text,
                     source,
                     question_id,
-                    submission_key
+                    submission_key,
+                    source_record_key
                 )
-                VALUES ($1, $2, $3, $4)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (source, source_record_key)
+                    WHERE source_record_key IS NOT NULL
+                    DO NOTHING
                 RETURNING
                     id,
                     original_text,
@@ -143,23 +196,63 @@ async def create_input(
                     topic,
                     question_id,
                     submission_key,
+                    source_record_key,
                     created_at
                 """,
                 payload.original_text,
                 payload.source,
                 question_id,
                 payload.submission_key,
+                payload.source_record_key,
             )
 
+            if row is None:
+                row = await connection.fetchrow(
+                    """
+                    SELECT
+                        id,
+                        original_text,
+                        source,
+                        status,
+                        topic,
+                        question_id,
+                        submission_key,
+                        source_record_key,
+                        created_at
+                    FROM original_inputs
+                    WHERE source = $1 AND source_record_key = $2
+                    """,
+                    payload.source,
+                    payload.source_record_key,
+                )
+                if row is None:
+                    raise RuntimeError(
+                        "source record disappeared during concurrent resolution"
+                    )
+                if (
+                    row["original_text"] != payload.original_text
+                    or row["question_id"] != question_id
+                    or row["submission_key"] != payload.submission_key
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            "source_record_key already exists with different "
+                            "input data"
+                        ),
+                    )
+
     response_data = dict(row)
+    response_data.setdefault("source_record_key", payload.source_record_key)
     response_data["question_context"] = (
         {
-            key: resolved_question[key]
+            key: resolved_question.get(key)
             for key in (
                 "form_key",
                 "question_key",
                 "question_version",
                 "question_text",
+                "form_id",
             )
         }
         if resolved_question is not None
@@ -318,11 +411,14 @@ async def list_inputs(
                 inputs.topic,
                 inputs.question_id,
                 inputs.submission_key,
+                inputs.source_record_key,
                 inputs.created_at,
+                questions.form_source_id,
                 questions.form_key,
                 questions.question_key,
                 questions.question_version,
                 questions.question_text,
+                form_sources.form_id,
                 COALESCE(
                     (
                         SELECT jsonb_agg(
@@ -358,6 +454,8 @@ async def list_inputs(
             FROM original_inputs AS inputs
             LEFT JOIN questions
                 ON questions.id = inputs.question_id
+            LEFT JOIN form_sources
+                ON form_sources.id = questions.form_source_id
             WHERE
                 ($1::text IS NULL OR questions.source = $1)
                 AND ($2::text IS NULL OR questions.form_key = $2)
@@ -386,14 +484,16 @@ async def list_inputs(
     responses: list[InputResponse] = []
     for row in rows:
         response_data = dict(row)
+        response_data.setdefault("source_record_key", None)
         response_data["question_context"] = (
             {
-                key: response_data[key]
+                key: response_data.get(key)
                 for key in (
                     "form_key",
                     "question_key",
                     "question_version",
                     "question_text",
+                    "form_id",
                 )
             }
             if response_data["question_id"] is not None

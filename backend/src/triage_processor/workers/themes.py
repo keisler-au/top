@@ -34,6 +34,8 @@ You are being shown one topic, the questions that gave it context, and a sample
 of its complete evidence membership. Decide whether the topic belongs to an
 existing theme, warrants a new theme, should update one theme, or supports
 merging existing themes. Use the topic name, questions, and sample evidence.
+input_count is the number of distinct original answers supporting the topic;
+an original answer and its segments always count as one input.
 The proposed theme name must be concise and contain 1–3 words.
 
 Return JSON with exactly this shape:
@@ -70,9 +72,10 @@ class AnalysisUnit:
 class TopicCluster:
     topic_name: str
     member_units: tuple[AnalysisUnit, ...]
+    distinct_original_input_ids: frozenset[int]
     distinct_question_ids: frozenset[int]
     distinct_question_texts: tuple[str, ...]
-    rich_member_count: int
+    rich_input_count: int
 
 
 @dataclass(frozen=True)
@@ -171,16 +174,22 @@ def build_topic_clusters(units: list[AnalysisUnit]) -> list[TopicCluster]:
                 and unit.question_text is not None
             )
         )
+        original_input_ids = frozenset(
+            unit.original_input_id for unit in ordered_members
+        )
+        rich_input_ids = {
+            unit.original_input_id
+            for unit in ordered_members
+            if not is_low_information(unit.text)
+        }
         clusters.append(
             TopicCluster(
                 topic_name=display_names[canonical_topic],
                 member_units=ordered_members,
+                distinct_original_input_ids=original_input_ids,
                 distinct_question_ids=question_ids,
                 distinct_question_texts=question_texts,
-                rich_member_count=sum(
-                    not is_low_information(unit.text)
-                    for unit in ordered_members
-                ),
+                rich_input_count=len(rich_input_ids),
             )
         )
     return clusters
@@ -189,19 +198,19 @@ def build_topic_clusters(units: list[AnalysisUnit]) -> list[TopicCluster]:
 def is_cluster_eligible(
     cluster: TopicCluster,
     *,
-    min_rich_units: int,
+    min_rich_inputs: int,
     min_distinct_questions_low_info: int,
 ) -> bool:
-    if min_rich_units < 1:
-        raise ValueError("min_rich_units must be at least 1")
+    if min_rich_inputs < 1:
+        raise ValueError("min_rich_inputs must be at least 1")
     if min_distinct_questions_low_info < 1:
         raise ValueError(
             "min_distinct_questions_low_info must be at least 1"
         )
-    if cluster.rich_member_count >= min_rich_units:
+    if cluster.rich_input_count >= min_rich_inputs:
         return True
     return (
-        cluster.rich_member_count == 0
+        cluster.rich_input_count == 0
         and len(cluster.distinct_question_ids)
         >= min_distinct_questions_low_info
     )
@@ -228,21 +237,33 @@ def sample_cluster_evidence(
     if limit < 1:
         raise ValueError("sample evidence limit must be at least 1")
 
-    selected: list[AnalysisUnit] = []
-    selected_keys: set[tuple[str, int]] = set()
-    represented_questions: set[int] = set()
+    # A segment is a more focused representation of its original answer for
+    # this topic. Keep at most one representative per original input so a
+    # segmented answer is never presented as multiple independent examples.
+    representatives_by_input: dict[int, AnalysisUnit] = {}
     for unit in cluster.member_units:
+        existing = representatives_by_input.get(unit.original_input_id)
+        if existing is None or (
+            existing.entity_type == "original"
+            and unit.entity_type == "segment"
+        ):
+            representatives_by_input[unit.original_input_id] = unit
+    representatives = list(representatives_by_input.values())
+
+    selected: list[AnalysisUnit] = []
+    selected_input_ids: set[int] = set()
+    represented_questions: set[int] = set()
+    for unit in representatives:
         if unit.question_id is None or unit.question_id in represented_questions:
             continue
         selected.append(unit)
-        selected_keys.add((unit.entity_type, unit.entity_id))
+        selected_input_ids.add(unit.original_input_id)
         represented_questions.add(unit.question_id)
         if len(selected) == limit:
             return [unit.text for unit in selected]
 
-    for unit in cluster.member_units:
-        key = (unit.entity_type, unit.entity_id)
-        if key in selected_keys:
+    for unit in representatives:
+        if unit.original_input_id in selected_input_ids:
             continue
         selected.append(unit)
         if len(selected) == limit:
@@ -811,12 +832,12 @@ async def process_cycle(
     *,
     sample_evidence_limit: int,
     theme_limit: int,
-    min_rich_units: int,
+    min_rich_inputs: int,
     min_distinct_questions_low_info: int,
 ) -> int:
     if sample_evidence_limit < 1 or theme_limit < 1:
         raise ValueError("limits must be at least 1")
-    if min_rich_units < 1 or min_distinct_questions_low_info < 1:
+    if min_rich_inputs < 1 or min_distinct_questions_low_info < 1:
         raise ValueError("eligibility thresholds must be at least 1")
 
     async with pool.acquire() as connection:
@@ -835,7 +856,7 @@ async def process_cycle(
             for cluster in clusters:
                 if not is_cluster_eligible(
                     cluster,
-                    min_rich_units=min_rich_units,
+                    min_rich_inputs=min_rich_inputs,
                     min_distinct_questions_low_info=(
                         min_distinct_questions_low_info
                     ),
@@ -872,7 +893,9 @@ async def process_cycle(
                             cluster,
                             sample_evidence_limit,
                         ),
-                        "member_count": len(cluster.member_units),
+                        "input_count": len(
+                            cluster.distinct_original_input_ids
+                        ),
                         "existing_themes": existing_themes,
                     }
                 )
@@ -920,14 +943,14 @@ async def run_worker(
     interval: float,
     sample_evidence_limit: int,
     theme_limit: int,
-    min_rich_units: int,
+    min_rich_inputs: int,
     min_distinct_questions_low_info: int,
 ) -> None:
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
     queue_settings = QueueSettings.from_env()
     suggester = LocalThemeLLMClient(
         base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
-        model=os.getenv("LLM_MODEL", "qwen3:4b"),
+        model=os.getenv("LLM_MODEL", "qwen3:4b-instruct"),
         api_key=os.getenv("LLM_API_KEY"),
         timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
     )
@@ -945,7 +968,7 @@ async def run_worker(
                 suggester,
                 sample_evidence_limit=sample_evidence_limit,
                 theme_limit=theme_limit,
-                min_rich_units=min_rich_units,
+                min_rich_inputs=min_rich_inputs,
                 min_distinct_questions_low_info=(
                     min_distinct_questions_low_info
                 ),
@@ -986,9 +1009,16 @@ def main() -> None:
         default=int(os.getenv("THEME_EXISTING_LIMIT", "50")),
     )
     parser.add_argument(
+        "--min-rich-inputs",
         "--min-rich-units",
+        dest="min_rich_inputs",
         type=int,
-        default=int(os.getenv("THEME_MIN_RICH_UNITS", "2")),
+        default=int(
+            os.getenv(
+                "THEME_MIN_RICH_INPUTS",
+                os.getenv("THEME_MIN_RICH_UNITS", "2"),
+            )
+        ),
     )
     parser.add_argument(
         "--min-distinct-questions-low-info",
@@ -1003,7 +1033,7 @@ def main() -> None:
     if (
         args.sample_evidence_limit < 1
         or args.theme_limit < 1
-        or args.min_rich_units < 1
+        or args.min_rich_inputs < 1
         or args.min_distinct_questions_low_info < 1
     ):
         parser.error("limits and eligibility thresholds must be at least 1")
@@ -1018,7 +1048,7 @@ def main() -> None:
             interval=args.interval,
             sample_evidence_limit=args.sample_evidence_limit,
             theme_limit=args.theme_limit,
-            min_rich_units=args.min_rich_units,
+            min_rich_inputs=args.min_rich_inputs,
             min_distinct_questions_low_info=(
                 args.min_distinct_questions_low_info
             ),

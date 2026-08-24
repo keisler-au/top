@@ -53,7 +53,7 @@ class SegmentationDecision(BaseModel):
         if not self.eligible and self.segments:
             raise ValueError("ineligible inputs cannot contain segments")
         if len(self.segments) == 1:
-            raise ValueError("segmentation requires at least two segments")
+            self.segments = []
         if len(set(self.segments)) != len(self.segments):
             raise ValueError("segments must be unique")
         return self
@@ -197,7 +197,7 @@ async def run_worker(*, once: bool, poll_interval: float) -> None:
     queue_settings = QueueSettings.from_env()
     segmenter = LocalLLMClient(
         base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
-        model=os.getenv("LLM_MODEL", "qwen3:4b"),
+        model=os.getenv("LLM_MODEL", "qwen3:4b-instruct"),
         api_key=os.getenv("LLM_API_KEY"),
         timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
     )

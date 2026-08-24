@@ -39,7 +39,7 @@ services:
     restart: "no"
     environment:
       OLLAMA_HOST: http://ollama:11434
-      LLM_MODEL: ${LLM_MODEL:-qwen3:4b}
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b-instruct}
       OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
     entrypoint: ["/bin/sh", "-c"]
     command:
@@ -81,6 +81,34 @@ services:
       ollama:
         condition: service_healthy
 
+  google-sheets:
+    profiles: ["google-sheets"]
+    build:
+      context: ./backend
+    command:
+      - python
+      - -m
+      - triage_processor.integrations.google_sheets
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
+      API_BASE_URL: http://api:8000
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/google-sheets.json
+      GOOGLE_SHEETS_POLL_INTERVAL: ${GOOGLE_SHEETS_POLL_INTERVAL:-5}
+      GOOGLE_SHEETS_BATCH_SIZE: ${GOOGLE_SHEETS_BATCH_SIZE:-100}
+      GOOGLE_SHEETS_TIMEOUT_SECONDS: ${GOOGLE_SHEETS_TIMEOUT_SECONDS:-30}
+      API_TIMEOUT_SECONDS: ${API_TIMEOUT_SECONDS:-30}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ${GOOGLE_SHEETS_CREDENTIALS_FILE:-./.secrets/google-sheets.json}:/run/secrets/google-sheets.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
+
   eligibility-segmentation:
     build:
       context: ./backend
@@ -89,7 +117,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
-      LLM_MODEL: ${LLM_MODEL:-qwen3:4b}
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b-instruct}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
       WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
@@ -144,7 +172,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
-      LLM_MODEL: ${LLM_MODEL:-qwen3:4b}
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b-instruct}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
       WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
@@ -175,13 +203,13 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
-      LLM_MODEL: ${LLM_MODEL:-qwen3:4b}
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b-instruct}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
       THEME_WORKER_INTERVAL: ${THEME_WORKER_INTERVAL:-2}
       THEME_EXISTING_LIMIT: ${THEME_EXISTING_LIMIT:-50}
       THEME_SAMPLE_EVIDENCE_LIMIT: ${THEME_SAMPLE_EVIDENCE_LIMIT:-5}
-      THEME_MIN_RICH_UNITS: ${THEME_MIN_RICH_UNITS:-2}
+      THEME_MIN_RICH_INPUTS: ${THEME_MIN_RICH_INPUTS:-${THEME_MIN_RICH_UNITS:-2}}
       THEME_MIN_DISTINCT_QUESTIONS_LOW_INFO: ${THEME_MIN_DISTINCT_QUESTIONS_LOW_INFO:-3}
       TOPIC_LOW_INFO_MAX_CHARS: ${TOPIC_LOW_INFO_MAX_CHARS:-15}
       TOPIC_LOW_INFO_CLOSED_FORM: ${TOPIC_LOW_INFO_CLOSED_FORM:-yes,no,n/a,na,none,maybe,unsure,idk}

@@ -357,7 +357,9 @@ def build_embedding_input(*, answer_text: str, question_text: str | None) -> str
 
 - Target-building loop in `topics.py` includes `question_text` on every
   target (original and segment), via the parent's `question_id`.
-- `_similar_segments` tiering:
+- `_similar_evidence` tiering searches completed segments plus completed
+  original inputs that have no segments. Segmented originals are excluded so
+  one answer is not represented by both its full text and its segments:
   1. For a contextual target, first query restricted to evidence whose
      parent `original_inputs.question_id` matches the target's
      `question_id`.
@@ -372,8 +374,7 @@ def build_embedding_input(*, answer_text: str, question_text: str | None) -> str
      still surface unrelated-question evidence for exactly the ambiguous,
      easily-miscontextualized answers ("No", "Price") that most need
      protecting against cross-contamination.
-  4. Generic inputs (`question_id IS NULL`) always use the global query
-     only, unchanged from today.
+  4. Generic inputs (`question_id IS NULL`) always use the global query only.
   - Tag each evidence item `"scope": "same_question" | "global"` for the
     LLM.
 
@@ -443,10 +444,12 @@ Replace `group_related_units`'s graph/BFS approach with:
    - `distinct_question_ids`: set of question ids represented (empty for
      purely generic members).
    - `distinct_question_texts`: their corresponding texts.
-   - `rich_member_count`: count of members where
-     `not is_low_information(unit.text)`.
+   - `distinct_original_input_ids`: set of original inputs represented.
+   - `rich_input_count`: count of distinct original inputs for which at least
+     one member is not low-information. An original and any of its segments
+     count once even when they share the topic.
 3. A `TopicCluster` is **eligible for theme evaluation** when:
-   - `rich_member_count >= THEME_MIN_RICH_UNITS` (default `2`), **or**
+   - `rich_input_count >= THEME_MIN_RICH_INPUTS` (default `2`), **or**
    - all members are low-information, but
      `len(distinct_question_ids) >= THEME_MIN_DISTINCT_QUESTIONS_LOW_INFO`
      (default `3`) — i.e. the same low-information answer recurring across
@@ -491,14 +494,14 @@ For each eligible `TopicCluster`, send:
     {"question_text": "What is the biggest barrier preventing you from purchasing?"}
   ],
   "sample_evidence": ["Price", "Too expensive for what it offers"],
-  "member_count": 14,
+  "input_count": 14,
   "existing_themes": [...]
 }
 ```
 
-`sample_evidence` is capped by `THEME_SAMPLE_EVIDENCE_LIMIT`, preferring
-diversity across `distinct_question_ids` when the topic spans multiple
-questions.
+`sample_evidence` is capped by `THEME_SAMPLE_EVIDENCE_LIMIT`, contains at most
+one representative excerpt per original input, and prefers diversity across
+`distinct_question_ids` when the topic spans multiple questions.
 
 Update `SYSTEM_PROMPT` to instruct the LLM that it is being shown a
 **topic**, not a raw answer group, and should decide whether this topic
@@ -536,8 +539,9 @@ becomes a `GROUP BY topic` with two count-based eligibility checks.
   distinct questions is **not** eligible for theme evaluation.
 - The same topic-cluster with a 3rd distinct question added becomes
   eligible.
-- A topic-cluster with 2 rich (non-low-information) members and any number
-  of low-information members is eligible regardless of question count.
+- A topic-cluster with 2 distinct rich original inputs and any number of
+  low-information members is eligible regardless of question count. An
+  original and its segments never satisfy this threshold by themselves.
 - Adding evidence older or newer than the former candidate-window boundary
   produces the same full-membership count and a deterministic fingerprint;
   adding one genuinely new member changes that fingerprint.

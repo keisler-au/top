@@ -5,6 +5,40 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
+CREATE TABLE IF NOT EXISTS form_sources (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    source TEXT NOT NULL DEFAULT 'google-sheets'
+        CONSTRAINT form_sources_source_nonempty CHECK (btrim(source) <> ''),
+    form_id TEXT NOT NULL
+        CONSTRAINT form_sources_form_id_nonempty CHECK (btrim(form_id) <> ''),
+    spreadsheet_id TEXT NOT NULL
+        CONSTRAINT form_sources_spreadsheet_id_nonempty
+        CHECK (btrim(spreadsheet_id) <> ''),
+    sheet_name TEXT NOT NULL DEFAULT 'Form Responses 1'
+        CONSTRAINT form_sources_sheet_name_nonempty
+        CHECK (btrim(sheet_name) <> ''),
+    ignored_headers TEXT[] NOT NULL DEFAULT ARRAY['Timestamp']::text[],
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    last_read_row INTEGER NOT NULL DEFAULT 1
+        CONSTRAINT form_sources_last_read_row_positive
+        CHECK (last_read_row >= 1),
+    poll_interval_seconds INTEGER NOT NULL DEFAULT 60
+        CONSTRAINT form_sources_poll_interval_positive
+        CHECK (poll_interval_seconds >= 1),
+    next_poll_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_polled_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT form_sources_identity_unique UNIQUE (source, form_id),
+    CONSTRAINT form_sources_sheet_unique
+        UNIQUE (spreadsheet_id, sheet_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_form_sources_due
+    ON form_sources (next_poll_at, id)
+    WHERE enabled;
+
 CREATE TABLE IF NOT EXISTS questions (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     source TEXT NOT NULL
@@ -18,6 +52,8 @@ CREATE TABLE IF NOT EXISTS questions (
         CONSTRAINT questions_version_positive CHECK (question_version >= 1),
     question_text TEXT NOT NULL
         CONSTRAINT questions_text_nonempty CHECK (btrim(question_text) <> ''),
+    form_source_id BIGINT
+        REFERENCES form_sources (id) ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT questions_identity_unique
         UNIQUE (source, form_key, question_key, question_version)
@@ -25,6 +61,10 @@ CREATE TABLE IF NOT EXISTS questions (
 
 CREATE INDEX IF NOT EXISTS idx_questions_source_form
     ON questions (source, form_key);
+
+CREATE INDEX IF NOT EXISTS idx_questions_form_source_id
+    ON questions (form_source_id)
+    WHERE form_source_id IS NOT NULL;
 
 CREATE OR REPLACE FUNCTION reject_question_mutation()
 RETURNS TRIGGER
@@ -73,6 +113,12 @@ CREATE TABLE IF NOT EXISTS original_inputs (
     submission_key TEXT
         CONSTRAINT original_inputs_submission_key_nonempty
         CHECK (submission_key IS NULL OR btrim(submission_key) <> ''),
+    source_record_key TEXT
+        CONSTRAINT original_inputs_source_record_key_nonempty
+        CHECK (
+            source_record_key IS NULL
+            OR btrim(source_record_key) <> ''
+        ),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT original_inputs_completed_has_topic
         CHECK (status <> 'completed' OR topic IS NOT NULL)
@@ -101,6 +147,10 @@ CREATE INDEX IF NOT EXISTS idx_original_inputs_question_id
 CREATE INDEX IF NOT EXISTS idx_original_inputs_submission_key
     ON original_inputs (submission_key)
     WHERE submission_key IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_original_inputs_source_record
+    ON original_inputs (source, source_record_key)
+    WHERE source_record_key IS NOT NULL;
 
 CREATE OR REPLACE FUNCTION reject_question_id_mutation()
 RETURNS TRIGGER
@@ -380,5 +430,6 @@ VALUES
     ('007_align_worker_contracts.sql'),
     ('008_add_worker_jobs.sql'),
     ('009_remove_theme_suggestion_review.sql'),
-    ('010_normalize_question_context.sql')
+    ('010_normalize_question_context.sql'),
+    ('011_add_google_sheet_sources.sql')
 ON CONFLICT DO NOTHING;
