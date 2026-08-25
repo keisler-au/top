@@ -11,6 +11,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/01-enable-pgvector.sql:ro
+      - ./infrastructure/postgres/migrations:/docker-entrypoint-initdb.d/migrations:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -219,6 +220,33 @@ services:
       QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-5}
       QUEUE_RETRY_BASE_SECONDS: ${QUEUE_RETRY_BASE_SECONDS:-5}
       QUEUE_RETRY_MAX_SECONDS: ${QUEUE_RETRY_MAX_SECONDS:-300}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+
+  article-generation:
+    build:
+      context: ./backend
+    command: ["python", "-m", "triage_processor.workers.article_generation"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-qwen3:4b-instruct}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-180}
+      GENERATION_WORKER_POLL_INTERVAL: ${GENERATION_WORKER_POLL_INTERVAL:-2}
+      GENERATION_QUEUE_LEASE_SECONDS: ${GENERATION_QUEUE_LEASE_SECONDS:-600}
+      GENERATION_QUEUE_MAX_ATTEMPTS: ${GENERATION_QUEUE_MAX_ATTEMPTS:-3}
+      GENERATION_QUEUE_RETRY_BASE_SECONDS: ${GENERATION_QUEUE_RETRY_BASE_SECONDS:-10}
+      GENERATION_QUEUE_RETRY_MAX_SECONDS: ${GENERATION_QUEUE_RETRY_MAX_SECONDS:-600}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:

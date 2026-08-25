@@ -18,8 +18,9 @@ from triage_processor.job_queue import QueueSettings, run_job_loop
 from triage_processor.workers.low_information import is_low_information
 
 LOGGER = logging.getLogger(__name__)
-TOPIC_PROMPT_VERSION = "2026-08-24.1"
+TOPIC_PROMPT_VERSION = "2026-08-25.1"
 TOPIC_WORD_LIMIT = 4
+TOPIC_REPRESENTATIVE_EVIDENCE_LIMIT = 3
 GENERIC_TOPIC_NAMES = {
     "answer",
     "comment",
@@ -101,6 +102,12 @@ Existing topic reuse:
 - Reuse an existing topic only when it represents the same underlying subject at
   an appropriate level of specificity. Related wording or a high similarity score
   alone is not enough.
+- Each target's topic_candidates group related prior evidence under its assigned
+  topic. Compare the target with the representative evidence for each candidate
+  before creating a new topic. Prefer a well-supported, reusable candidate over a
+  response-specific variation.
+- existing_topics is the complete available catalog for this decision. usage_count
+  indicates established reuse, but never overrides a semantic mismatch.
 - Prefer semantically equivalent same_question evidence over global evidence.
 - When reusing, copy the existing topic name exactly and set reused_existing to
   true. Otherwise create a new normalized name and set reused_existing to false.
@@ -466,6 +473,47 @@ def _unique_topics(topics: list[str], limit: int) -> list[str]:
     return unique
 
 
+def _group_topic_candidates(
+    evidence: list[dict[str, object]],
+    *,
+    limit: int,
+    representative_limit: int = TOPIC_REPRESENTATIVE_EVIDENCE_LIMIT,
+) -> list[dict[str, object]]:
+    """Group nearest evidence into topic candidates in best-match order."""
+    candidates: list[dict[str, object]] = []
+    candidate_by_key: dict[str, dict[str, object]] = {}
+    for item in evidence:
+        topic = item.get("topic")
+        if not isinstance(topic, str) or not topic.strip():
+            continue
+        key = topic.casefold()
+        candidate = candidate_by_key.get(key)
+        if candidate is None:
+            if len(candidates) == limit:
+                continue
+            candidate = {
+                "name": topic,
+                "best_similarity": item["similarity"],
+                "representative_evidence": [],
+            }
+            candidate_by_key[key] = candidate
+            candidates.append(candidate)
+        representatives = candidate["representative_evidence"]
+        if not isinstance(representatives, list):  # pragma: no cover - internal
+            raise TypeError("representative_evidence must be a list")
+        if len(representatives) < representative_limit:
+            representatives.append(
+                {
+                    "evidence_type": item["evidence_type"],
+                    "evidence_id": item["evidence_id"],
+                    "text": item["text"],
+                    "similarity": item["similarity"],
+                    "scope": item["scope"],
+                }
+            )
+    return candidates
+
+
 def _validate_segment_assignments(
     decision: TopicDecision,
     segment_ids: list[int],
@@ -666,7 +714,10 @@ async def _similar_evidence(
             WHERE
                 evidence.original_input_id <> $2
                 AND evidence.topic IS NOT NULL
-                AND evidence_inputs.status = 'completed'
+                AND evidence_inputs.status IN (
+                    'completed',
+                    'ready_for_analysis'
+                )
                 AND evidence.embedding_model = $3
                 AND vector_dims(evidence.embedding) = vector_dims($1::vector)
                 {question_filter}
@@ -924,7 +975,10 @@ async def process_next_input(
                         "id": target["id"],
                         "text": target["text"],
                         "question_text": target["question_text"],
-                        "similar_evidence": evidence,
+                        "topic_candidates": _group_topic_candidates(
+                            evidence,
+                            limit=similar_limit,
+                        ),
                     }
                 )
 
@@ -934,7 +988,10 @@ async def process_next_input(
                 FROM (
                     SELECT inputs.topic
                     FROM original_inputs AS inputs
-                    WHERE inputs.status = 'completed'
+                    WHERE inputs.status IN (
+                        'completed',
+                        'ready_for_analysis'
+                    )
 
                     UNION ALL
 
@@ -942,7 +999,10 @@ async def process_next_input(
                     FROM segment_inputs AS segments
                     JOIN original_inputs AS inputs
                         ON inputs.id = segments.original_input_id
-                    WHERE inputs.status = 'completed'
+                    WHERE inputs.status IN (
+                        'completed',
+                        'ready_for_analysis'
+                    )
                 ) AS assigned_topics
                 WHERE topic IS NOT NULL AND btrim(topic) <> ''
                 GROUP BY topic
@@ -956,10 +1016,20 @@ async def process_next_input(
                 [*evidence_topics, *popular_topics],
                 topic_limit,
             )
+            usage_by_topic = {
+                row["topic"].casefold(): int(row["usage_count"])
+                for row in topic_rows
+            }
 
             request_context = {
                 "targets": llm_targets,
-                "existing_topics": existing_topics,
+                "existing_topics": [
+                    {
+                        "name": topic,
+                        "usage_count": usage_by_topic.get(topic.casefold()),
+                    }
+                    for topic in existing_topics
+                ],
             }
             assignment_run_id = uuid.uuid4()
             correction: dict[str, object] | None = None

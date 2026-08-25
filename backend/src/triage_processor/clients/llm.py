@@ -27,6 +27,7 @@ class StructuredChatClient:
         *,
         system_prompt: str,
         user_content: str,
+        max_tokens: int = 512,
     ) -> dict[str, object]:
         response = await self._client.post(
             "/chat/completions",
@@ -38,7 +39,7 @@ class StructuredChatClient:
                 ],
                 "temperature": 0,
                 "reasoning_effort": "none",
-                "max_tokens": 512,
+                "max_tokens": max_tokens,
                 "response_format": {"type": "json_object"},
             },
         )

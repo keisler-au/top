@@ -446,6 +446,11 @@ AFTER INSERT OR UPDATE OF status ON original_inputs
 FOR EACH ROW
 EXECUTE FUNCTION enqueue_original_input_job();
 
+-- Article and generation schemas are kept in their independently runnable
+-- migrations to avoid duplicating the larger definitions in this snapshot.
+\ir migrations/013_add_articles.sql
+\ir migrations/014_add_article_generation.sql
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
     filename TEXT PRIMARY KEY,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -463,5 +468,7 @@ VALUES
     ('009_remove_theme_suggestion_review.sql'),
     ('010_normalize_question_context.sql'),
     ('011_add_google_sheet_sources.sql'),
-    ('012_add_topic_assignment_audit.sql')
+    ('012_add_topic_assignment_audit.sql'),
+    ('013_add_articles.sql'),
+    ('014_add_article_generation.sql')
 ON CONFLICT DO NOTHING;

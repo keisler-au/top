@@ -27,6 +27,8 @@ Input received
 → topic assignment
 → topic-level theme inference
 → theme materialization
+→ evidence-grounded article generation
+→ explicit editorial approval
 ```
 
 ## Worker responsibilities
@@ -70,6 +72,18 @@ Runs from queued completion events across completed inputs.
 * Ask the LLM to reuse, update, merge or create themes.
 * Link themes to relevant topics and supporting inputs.
 * Materialize suggestions into live themes and topic links.
+
+### Worker 5: article generation
+
+Processes durable generation jobs independently of the evidence pipeline.
+
+* Freeze canonical evidence and a versioned, validated HTML template when a
+  job is created.
+* Ask the LLM for strictly validated structured JSON rather than HTML.
+* Reject citations and taxonomy tags outside the frozen job scope.
+* Escape and sanitize rendered output, then create a `ready_for_review`
+  article with immutable revision provenance.
+* Lease, retry, and dead-letter jobs so work survives worker restarts.
 
 ## Key distinction
 
@@ -122,11 +136,14 @@ Suggestion rows preserve the model's audit trail, while `themes` and
 └── compose.yaml
 ```
 
-The `frontend` directory is intentionally empty. See
+See
 [Architecture](docs/architecture.md) for the backend responsibility boundaries
 and [Worker queue](docs/worker-queue.md) for queue operations. The optional
 [Google Sheets importer](docs/google-sheets.md) polls registered Google Form
 response sheets without requiring a public webhook.
+
+Article lifecycle, templates, and generation endpoints are documented in
+[Article and generation API](docs/article-generation-api.md).
 
 ## Backend development
 

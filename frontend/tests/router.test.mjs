@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { matchRoute } from "../dist/assets/router.js";
+import { legacyRedirectUrl, matchRoute } from "../dist/assets/router.js";
 
 test("matches static routes and preserves query parameters", () => {
   const match = matchRoute({
@@ -13,6 +13,21 @@ test("matches static routes and preserves query parameters", () => {
   assert.equal(match.pathname, "/taxonomy");
   assert.equal(match.search.get("type"), "theme");
   assert.equal(match.search.get("page"), "2");
+});
+
+test("redirects legacy taxonomy URLs to Overview without losing state", () => {
+  assert.equal(
+    legacyRedirectUrl({
+      pathname: "/taxonomy/",
+      search: "?type=topic&search=parks&page=2",
+      hash: "#coverage-heading",
+    }),
+    "/?type=topic&search=parks&page=2#coverage-heading",
+  );
+  assert.equal(
+    legacyRedirectUrl({ pathname: "/templates", search: "", hash: "" }),
+    null,
+  );
 });
 
 test("matches and decodes dynamic route parameters", () => {

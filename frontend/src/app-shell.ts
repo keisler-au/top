@@ -1,25 +1,6 @@
-import type { RouteMatch, RouteName } from "./router.js";
+import { generationHref, primaryNavigation } from "./navigation.js";
+import type { RouteMatch } from "./router.js";
 import { Router } from "./router.js";
-
-interface NavigationItem {
-  href: string;
-  label: string;
-  route: RouteName;
-  icon: string;
-}
-
-const navigation: readonly NavigationItem[] = [
-  { href: "/", label: "Overview", route: "overview", icon: "⌂" },
-  {
-    href: "/taxonomy?type=theme",
-    label: "Themes & topics",
-    route: "taxonomy",
-    icon: "◇",
-  },
-  { href: "/articles", label: "Articles", route: "articles", icon: "▤" },
-  { href: "/templates", label: "Templates", route: "templates", icon: "▧" },
-  { href: "/forms", label: "Forms", route: "forms", icon: "＋" },
-];
 
 export class DashboardApp extends HTMLElement {
   readonly #router = new Router();
@@ -78,7 +59,7 @@ export class DashboardApp extends HTMLElement {
     compactBrand.className = "compact-brand";
     compactBrand.textContent = "Evidence dashboard";
     const mobileGenerate = document.createElement("a");
-    mobileGenerate.href = "/generate";
+    mobileGenerate.href = generationHref;
     mobileGenerate.dataset.route = "";
     mobileGenerate.className = "mobile-create-link";
     mobileGenerate.setAttribute("aria-label", "Generate an article");
@@ -104,7 +85,7 @@ export class DashboardApp extends HTMLElement {
     nav.setAttribute("aria-label", "Primary navigation");
     const list = document.createElement("ul");
     list.className = "navigation-list";
-    for (const item of navigation) {
+    for (const item of primaryNavigation) {
       const listItem = document.createElement("li");
       const link = document.createElement("a");
       link.href = item.href;
@@ -126,7 +107,7 @@ export class DashboardApp extends HTMLElement {
     this.#navigation = nav;
 
     const createLink = document.createElement("a");
-    createLink.href = "/generate";
+    createLink.href = generationHref;
     createLink.dataset.route = "";
     createLink.className = "create-link";
     createLink.textContent = "Generate article";

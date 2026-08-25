@@ -171,10 +171,7 @@ export class EvidenceDrawer extends HTMLElement {
 
     const excerpt = document.createElement("blockquote");
     excerpt.textContent = item.excerpt;
-    const topic = document.createElement("p");
-    topic.className = "evidence-topic";
-    topic.textContent = `Topic: ${item.topic_name}`;
-    article.append(meta, excerpt, topic);
+    article.append(meta, excerpt);
 
     if (item.question_context) {
       const question = document.createElement("p");
@@ -183,18 +180,20 @@ export class EvidenceDrawer extends HTMLElement {
       article.append(question);
     }
 
-    const sourceParts = [`Source: ${item.source}`];
+    const sourceParts = [`Source:`];
     if (item.question_context) {
       sourceParts.push(
-        `Form: ${item.question_context.form_id ?? item.question_context.form_key}`,
+        `${item.question_context.form_id ?? item.question_context.form_key} `,
       );
     }
     if (item.submission_key) {
-      sourceParts.push(`Submission: ${item.submission_key}`);
+      const match = item.submission_key.match(/\d+$/);
+      const rowNumber = match ? match[0] : null;
+      sourceParts.push(`· row ${rowNumber}`);
     }
     const source = document.createElement("p");
     source.className = "evidence-source";
-    source.textContent = sourceParts.join(" · ");
+    source.textContent = sourceParts.join(" ");
     article.append(source);
 
     if (item.type === "segment") {

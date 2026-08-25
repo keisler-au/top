@@ -1,10 +1,4 @@
-"""SQL building blocks for the read-only dashboard API.
-
-The article work packages have not introduced article persistence yet. The
-taxonomy projections therefore expose the contracted article fields as zero.
-Keeping those fields in the response now makes the WP6 frontend contract
-stable; the aggregate CTEs can be extended when article tables are added.
-"""
+"""SQL building blocks for evidence, taxonomy, and article coverage."""
 
 CANONICAL_EVIDENCE_CTE = """
 canonical_evidence AS (
@@ -101,33 +95,65 @@ canonical_theme_topics AS (
 """
 
 TOPIC_AGGREGATES_CTE = """
+topic_article_counts AS (
+    SELECT
+        links.topic_key,
+        count(DISTINCT articles.id)::bigint AS article_count,
+        count(DISTINCT articles.id) FILTER (
+            WHERE articles.status = 'approved'
+        )::bigint AS approved_article_count
+    FROM article_topics AS links
+    JOIN articles ON articles.id = links.article_id
+    WHERE articles.status <> 'archived'
+    GROUP BY links.topic_key
+),
 topic_aggregates AS (
     SELECT
         evidence.topic_key AS key,
         min(evidence.topic_name COLLATE "C") AS name,
         NULL::text AS description,
         count(*)::bigint AS evidence_count,
-        0::bigint AS article_count,
-        0::bigint AS approved_article_count
+        COALESCE(max(article_counts.article_count), 0)::bigint AS article_count,
+        COALESCE(max(article_counts.approved_article_count), 0)::bigint
+            AS approved_article_count
     FROM canonical_evidence AS evidence
+    LEFT JOIN topic_article_counts AS article_counts
+        ON article_counts.topic_key = evidence.topic_key
     GROUP BY evidence.topic_key
 )
 """
 
 THEME_AGGREGATES_CTE = """
+theme_article_counts AS (
+    SELECT
+        theme_map.canonical_theme_id AS theme_id,
+        count(DISTINCT articles.id)::bigint AS article_count,
+        count(DISTINCT articles.id) FILTER (
+            WHERE articles.status = 'approved'
+        )::bigint AS approved_article_count
+    FROM article_themes AS links
+    JOIN canonical_theme_map AS theme_map
+        ON theme_map.theme_id = links.theme_id
+    JOIN articles ON articles.id = links.article_id
+    WHERE articles.status <> 'archived'
+    GROUP BY theme_map.canonical_theme_id
+),
 theme_aggregates AS (
     SELECT
         themes.id AS key,
         themes.name,
         themes.description,
         count(DISTINCT evidence.evidence_id)::bigint AS evidence_count,
-        0::bigint AS article_count,
-        0::bigint AS approved_article_count
+        COALESCE(max(article_counts.article_count), 0)::bigint AS article_count,
+        COALESCE(max(article_counts.approved_article_count), 0)::bigint
+            AS approved_article_count
     FROM themes
     LEFT JOIN canonical_theme_topics AS linked_topics
         ON linked_topics.theme_id = themes.id
     LEFT JOIN canonical_evidence AS evidence
         ON evidence.topic_key = linked_topics.topic_key
+    LEFT JOIN theme_article_counts AS article_counts
+        ON article_counts.theme_id = themes.id
     WHERE themes.merged_into_id IS NULL
     GROUP BY themes.id, themes.name, themes.description
 )
@@ -147,9 +173,15 @@ SELECT
         SELECT count(DISTINCT topic_key)
         FROM canonical_evidence
     )::bigint AS topic_count,
-    0::bigint AS article_count,
-    0::bigint AS awaiting_approval_count,
-    0::bigint AS failed_generation_count
+    (
+        SELECT count(*) FROM articles WHERE status <> 'archived'
+    )::bigint AS article_count,
+    (
+        SELECT count(*) FROM articles WHERE status = 'ready_for_review'
+    )::bigint AS awaiting_approval_count,
+    (
+        SELECT count(*) FROM article_generation_jobs WHERE status = 'failed'
+    )::bigint AS failed_generation_count
 """
 
 
@@ -350,4 +382,3 @@ WHERE evidence_count > 0
 ORDER BY {order_by}
 LIMIT $1
 """
-

@@ -1,8 +1,8 @@
 # Remaining dashboard and article work packages
 
-This document is the implementation handoff for work that remains after WP1,
-WP2, WP5, WP6, WP7, and the form-source portion of WP10. It preserves the
-original work-package numbering so future changes can refer to a stable plan.
+This document is the implementation handoff for work that remains after WP1
+through WP7, plus the form-source portion of WP10. It preserves the original
+work-package numbering so future changes can refer to a stable plan.
 
 ## Completed baseline
 
@@ -11,25 +11,512 @@ The following work is complete:
 - **WP1:** dashboard product and data contract in
   [`dashboard-product-contract.md`](dashboard-product-contract.md).
 - **WP2:** dashboard summary, taxonomy, evidence, and recommendation read APIs.
+- **WP3:** durable articles, revisions, provenance, lifecycle, and live coverage
+  aggregates.
+- **WP4:** safe versioned templates, durable generation jobs, and the article
+  generation worker.
 - **WP5:** form-source administration API.
 - **WP6:** framework-free TypeScript/Web Components frontend foundation.
 - **WP7:** responsive overview and taxonomy coverage dashboard.
 - **WP10 forms:** registration, editing, health display, and polling controls.
 
-The current dashboard is useful for evidence discovery, but article-related
-metrics intentionally return zero. `dashboard_queries.py` contains these
-transitional zero projections. WP3 must replace them with real aggregates.
+The dashboard now reads article and generation metrics from their durable
+tables. The remaining packages expose those backend capabilities through the
+generation and editorial interfaces.
 
 The remaining recommended order is:
 
 ```text
-WP3 ──→ WP4 ──→ WP8 ──→ WP9
-  │       │
-  │       └────→ WP10 templates
-  └────────────→ WP11
+WP8 ──→ WP9
+ │
+ └────→ WP10 in-workflow template subflow
 
 WP11 ──→ WP12
 ```
+
+## Approved navigation consolidation work packages
+
+**Status: partially completed.** NAV-WP1 and NAV-WP2 are implemented;
+NAV-WP3 and NAV-WP4 remain planned.
+
+### Planning assessment (resolved by NAV-WP1/NAV-WP2)
+
+- The **Themes & topics** navigation item opened `/taxonomy`, but that route
+  rendered the same `dashboard-overview` component and coverage controls as the
+  Overview route. It was a reduced duplicate view rather than a separate product
+  area.
+- **Generate article** had three entry points: the Overview page
+  header, the desktop/mobile sidebar action, and the compact mobile-header
+  action. The Overview-header action is redundant.
+- The sidebar was a flex child of the application grid. At desktop widths it could
+  stretch with long page content, while `.create-link` used
+  `margin-block-start: auto`; consequently the generation action could be placed
+  at the bottom of the expanded grid/sidebar instead of the viewport.
+- **Templates** remains a placeholder route but is no longer linked from primary
+  navigation. WP8 already requires template selection and preview inside article
+  generation, while the original
+  WP10 proposed a separate administration screen. That WP10 proposal conflicts
+  with the new requirement that template access belongs exclusively to the
+  generation workflow.
+
+The resulting primary navigation is:
+
+```text
+Overview
+Articles
+Forms
+
+[Generate article]  # persistent sidebar action, separate from the nav list
+```
+
+The compact mobile-header generation shortcut may remain as a supplementary
+small-screen entry point. Opening the mobile side panel must also expose the
+full **Generate article** action without scrolling.
+
+The implementation order is:
+
+```text
+NAV-WP1 ──→ NAV-WP2 ──→ NAV-WP3 ──→ NAV-WP4
+                         │
+                         └── requires the usable WP8 generation workflow
+```
+
+### NAV-WP1 — Navigation and route contract
+
+**Status: completed.** `/taxonomy` redirects to Overview with query/hash state
+preserved, Templates remains temporarily routable but unlinked, and route and
+navigation-contract tests cover the transition.
+
+#### Objective
+
+Lock the simplified information architecture and compatibility behavior before
+changing links or routes.
+
+#### Scope
+
+- Treat Overview as the only dashboard taxonomy/coverage surface. Its existing
+  Themes/Topics switch, filtering, sorting, pagination, evidence drawer, and
+  per-row generation actions remain available.
+- Remove Themes & topics and Templates from the primary-navigation contract.
+- Keep Generate article as a visually distinct sidebar action rather than a
+  normal navigation-list item.
+- Define `/taxonomy` as a legacy URL. It must redirect with history replacement
+  to `/?...`, preserving supported dashboard query parameters such as `type`,
+  `search`, `sort`, `direction`, `page`, and `page_size`.
+- During the transition, `/templates` may remain routable but unlinked. Once
+  NAV-WP3 is complete it redirects with history replacement to `/generate`.
+  Do not expose an unfinished or context-free template-administration page.
+- Update product/navigation documentation and route tests to reflect these
+  decisions. No backend API or database change belongs in this package.
+
+#### Acceptance criteria
+
+- The intended navigation contains only Overview, Articles, and Forms plus the
+  separate generation action.
+- Existing `/taxonomy` bookmarks have a documented, state-preserving destination.
+- The template-route transition cannot strand users before WP8 is usable.
+- Browser history is not polluted by compatibility redirects.
+
+### NAV-WP2 — Simplified shell and viewport-persistent generation action
+
+**Status: completed.** The duplicate navigation entries and Overview action are
+removed. The sidebar now uses a viewport-bounded three-row layout with an
+independently scrollable navigation region and persistent generation action.
+
+#### Objective
+
+Remove duplicate entry points and keep the sidebar generation action visible
+regardless of main-content length.
+
+#### Frontend work
+
+- Remove Themes & topics and Templates from the `navigation` collection in
+  `frontend/src/app-shell.ts`.
+- Remove the Overview page-header Generate article link from
+  `dashboard-overview.ts`. Preserve taxonomy-row and recommendation generation
+  links because those carry a selected target and strategy.
+- Constrain the sidebar to the viewport using dynamic viewport units and an
+  explicit header/navigation/action layout. The recommended shape is a grid with
+  `auto minmax(0, 1fr) auto` rows, with only the middle navigation region allowed
+  to scroll. Do not solve this with absolute positioning over navigation items.
+- Ensure the action remains visible in both the fixed mobile drawer and sticky
+  desktop sidebar, including browser zoom, short viewports, and long content.
+- Preserve menu close, focus restoration, active-route indication, and Escape
+  behavior.
+
+#### Tests
+
+- Shell-rendering assertions for the reduced navigation and single desktop
+  sidebar action.
+- Assert the Overview heading has no generic generation action while targeted
+  coverage/recommendation actions remain.
+- Real-browser checks with deliberately long Overview content at 320px, tablet,
+  desktop, 200% zoom, and a short landscape viewport.
+- Verify the generation action is visible and keyboard reachable without
+  scrolling the main page to its end.
+
+#### Acceptance criteria
+
+- No Themes & topics or Templates tab appears in the side panel.
+- No Generate article button appears at the top right of Overview.
+- The sidebar Generate article action remains in the viewport independently of
+  page-content height.
+- Overview retains all theme/topic exploration capability.
+
+### NAV-WP3 — Template access inside article generation
+
+#### Objective
+
+Make the generation workflow the only user-facing entry point for template
+selection and management, then retire the standalone Templates route.
+
+#### Dependencies
+
+Requires WP4's template APIs and a usable WP8 `/generate` workflow. Hiding the
+navigation link in NAV-WP2 does not require those dependencies; retiring the
+route does.
+
+#### Frontend work
+
+- Keep template selection and preview as the required Template step in WP8.
+- If operators must create a template, add a version, inspect history, or archive
+  a template, expose those controls as a nested subflow launched from that step,
+  not as a top-level page.
+- Returning from template management must restore the in-progress generation
+  request, selected target/evidence, and selected template when still valid.
+- Reuse the same safe preview isolation and backend validation rules specified by
+  WP4 and WP10.
+- Remove `templates` from `RouteName`, route definitions, placeholder copy, and
+  route rendering after the nested workflow is available.
+- Redirect legacy `/templates` visits to `/generate` using history replacement.
+  Do not deep-link directly to the Template step unless the workflow has enough
+  validated state to enter that step safely.
+
+#### Acceptance criteria
+
+- Templates cannot be browsed or managed from primary navigation or a standalone
+  dashboard page.
+- Every template interaction begins within an article-generation request.
+- Template creation/management does not discard generation progress.
+- Legacy `/templates` links end at a usable generation starting point.
+
+### NAV-WP4 — Navigation regression and accessibility verification
+
+#### Objective
+
+Verify the consolidated navigation as one responsive, accessible workflow after
+NAV-WP2 and NAV-WP3 are complete.
+
+#### Verification
+
+- Add router tests for `/taxonomy` query preservation and `/templates`
+  compatibility behavior.
+- Add browser coverage for Overview → targeted generation, sidebar → generation,
+  generation → nested template management → generation, and browser Back/Forward.
+- Verify landmarks, accessible names, `aria-current`, focus order, focus return,
+  mobile drawer behavior, and visible focus.
+- Confirm there is no remaining top-level Templates or Themes & topics link in
+  rendered markup at any supported viewport.
+- Include the sidebar viewport checks in WP11's ongoing Playwright/accessibility
+  suite so future long pages cannot regress the action placement.
+
+#### Acceptance criteria
+
+- All generation entry points lead to the same recoverable workflow.
+- Compatibility routes preserve user intent without redirect loops.
+- The reduced shell is keyboard and screen-reader operable at mobile and desktop
+  widths.
+- Long content cannot push the sidebar generation action out of view.
+
+## Pipeline visibility work packages
+
+**Status: planned; not implemented.** These packages add operator visibility
+without adding another primary-navigation tab or exposing administrative queue
+controls.
+
+### Current-state assessment
+
+The backend already stores enough state for a useful first version:
+
+- `original_inputs.status` identifies the current pipeline stage.
+- `worker_jobs` stores job type, pending/processing/completed/failed state,
+  attempts, retry availability, lease heartbeat, last error, and completion time.
+- `segment_inputs` allows a queued response to report its currently known
+  canonical evidence-unit count: segment count after segmentation, otherwise one.
+- `topic_assignment_attempts` stores assignment runs, validation attempts,
+  accepted state, prompt version, validation errors, and the accepted structured
+  assignment.
+- `theme_suggestions` and its link tables store new/reuse/update/merge actions,
+  rationale, topics, supporting evidence, and materialization state.
+- `themes`, `theme_topics`, and completed evidence can identify topics that do
+  not yet belong to a live theme.
+
+None of this operational state is exposed by a purpose-built API or UI. The
+existing `/inputs` endpoint returns an input's current status, topic, and themes,
+but it does not expose queue position/state, retry timing, attempts, processing
+health, topic-assignment history, or theme activity.
+
+Terminology must remain precise:
+
+- Before eligibility and segmentation finish, the system knows that a response
+  is queued but does not yet know how many canonical evidence units it will
+  produce.
+- An embedding or topic job is work for one original input and its segments.
+- A theme job created when an input completes is a **theme refresh trigger**. The
+  theme worker performs a global topic-level pass; its queue depth is not a count
+  of themes waiting to be created and must never be presented that way.
+
+### Recommended placement
+
+Add a compact **Processing activity** panel to Overview, close to **Needs
+attention**. It shows whether work is flowing and calls attention to retries or
+failures without competing with coverage metrics.
+
+The panel links to a secondary `/processing` detail route for the queue table,
+topic-assignment activity, and theme activity. `/processing` is deliberately not
+a sidebar tab: it is an operational drill-down reached from Overview and can be
+bookmarked directly.
+
+The implementation order is:
+
+```text
+VIS-WP1 ──→ VIS-WP2 ──→ VIS-WP3 ──→ VIS-WP4
+```
+
+This stream can proceed independently of article WP3/WP4/WP8. It depends only
+on the completed dashboard/frontend foundation and the current worker queue.
+
+### VIS-WP1 — Processing visibility product and data contract
+
+#### Objective
+
+Define operator-facing meanings and response contracts before exposing internal
+queue records.
+
+#### Overview panel contract
+
+Show a concise, auto-refreshing summary:
+
+- responses currently in processing;
+- known evidence units awaiting embedding or topic assignment;
+- active jobs;
+- jobs waiting for retry;
+- failed jobs requiring attention;
+- age of the oldest available pending job;
+- latest successful topic assignment and theme refresh times.
+
+Use plain-language stage labels:
+
+```text
+Checking eligibility
+Creating embeddings
+Assigning topics
+Refreshing themes
+Waiting to retry
+Failed
+```
+
+Do not show a fabricated overall percentage: the number and duration of LLM
+validation attempts are not known in advance.
+
+#### Detail-route contract
+
+The `/processing` route contains three sections:
+
+1. **Current queue** — filterable rows for pending, processing, retrying, and
+   failed work.
+2. **Topic assignment activity** — recent accepted assignments and validation
+   corrections, summarized without exposing raw prompts.
+3. **Theme activity** — recent new/reuse/update/merge materializations,
+   unmaterialized suggestions, unlinked topics, and theme refresh health.
+
+Queue rows show only useful operator information:
+
+- input ID, bounded excerpt, source, and question/form context where available;
+- stage and job state;
+- known evidence-unit count, explicitly marked unknown before segmentation;
+- queued/available time, attempt count, and last heartbeat for active work;
+- next retry time and a bounded safe error message for retrying/failed work;
+- current assigned topic/theme names when they exist.
+
+Topic activity may expose assigned topic names, reused-versus-new counts, number
+of validation attempts, validation correction summaries, model/prompt version,
+and completion time. Do not return `request_context`, raw LLM responses, full
+prompts, embeddings, database lock owners, or unbounded exception text.
+
+Theme activity may expose action, canonical/materialized theme, affected topics,
+supporting-evidence count, bounded rationale, and timestamps. Label unmaterialized
+suggestions as pending materialization, not as confirmed themes.
+
+#### Acceptance criteria
+
+- Every metric and status has an unambiguous operator-facing definition.
+- Responses, known evidence units, jobs, topics, themes, and theme refresh
+  triggers are never conflated.
+- The contract exposes enough information to understand delays and failures
+  without leaking raw model/database internals.
+- This package remains read-only; retry, cancel, reprioritize, and delete actions
+  require a separate future authorization and operations design.
+
+### VIS-WP2 — Read-only processing and activity APIs
+
+#### Objective
+
+Add bounded APIs that implement VIS-WP1 from existing durable state.
+
+#### Backend API
+
+Add schemas and routes under a dedicated operational prefix:
+
+```text
+GET /processing/summary
+GET /processing/jobs
+GET /processing/topic-activity
+GET /processing/theme-activity
+```
+
+`/processing/jobs` supports bounded deterministic pagination plus filters for
+stage, job state, source, form, and search. Define `retrying` as a presentation
+state derived from a pending job with prior attempts/error and a future
+`available_at`; do not add it to the database status constraint.
+
+Summary queries must:
+
+- count each original input once in the pipeline total even though it has one
+  queue row per stage over its lifetime;
+- count only pending, processing, retrying, and failed jobs as current work;
+- derive known canonical evidence units using segments when present and one
+  original otherwise, but return an explicit certainty flag for pre-segmentation
+  inputs;
+- separate topic jobs from theme refresh triggers;
+- calculate oldest-wait age from jobs currently available, excluding scheduled
+  retry delay;
+- expose timestamps as UTC API datetimes and let the frontend localize them.
+
+Topic activity must select the accepted attempt from each assignment run and
+derive safe summary fields in SQL/Python. Failed jobs without an accepted attempt
+remain visible through `/processing/jobs`; do not fabricate a topic decision.
+
+Theme activity must resolve merged theme aliases to their canonical live roots
+and use distinct evidence counts so join multiplicity cannot inflate activity.
+
+#### Optional schema refinement
+
+If product review requires true processing duration rather than heartbeat age,
+add a migration for `worker_jobs.processing_started_at`. Set it only when a job
+enters processing, preserve it across lease heartbeats, and clear it when a retry
+is scheduled. Do not reinterpret `locked_at`: it is a renewable lease heartbeat,
+not a stable start time.
+
+#### Tests
+
+- Summary counts across every input and queue state.
+- Initial pending versus delayed retry classification.
+- Split/unsplit and pre-segmentation evidence-count certainty.
+- Failed job error bounding and absence of internal lock-owner data.
+- Accepted topic-attempt selection across correction attempts.
+- New/reused topic aggregation from accepted structured decisions.
+- Theme action, alias resolution, pending materialization, and distinct evidence
+  counts.
+- Pagination/filter validation and deterministic ordering.
+
+#### Acceptance criteria
+
+- Operators can query current work and recent topic/theme outcomes without SQL.
+- Counts reconcile with the durable queue under concurrent worker updates.
+- No endpoint returns raw prompts, embeddings, secrets, or unrestricted model
+  output.
+- All endpoints are read-only and bounded.
+
+### VIS-WP3 — Overview processing panel and processing detail route
+
+#### Objective
+
+Make pipeline progress visible at a glance and explainable on drill-down.
+
+#### Overview panel
+
+Add **Processing activity** near **Needs attention** with:
+
+- a primary summary such as “12 responses processing”;
+- compact stage counts for embeddings, topic assignment, and theme refresh;
+- warning/danger status for delayed retries and failures;
+- oldest-wait text when pending work is delayed;
+- last topic assignment and theme refresh timestamps;
+- a **View processing details** link to `/processing`.
+
+The panel must distinguish an empty healthy queue from an unavailable API. It
+polls on the same visibility-aware cadence as the dashboard, preserves the last
+successful snapshot during a transient refresh error, and announces material
+status changes politely rather than re-announcing every poll.
+
+#### Processing detail page
+
+Implement a route-level Web Component with URL-backed filters and pagination.
+Use a compact summary followed by Current queue, Topic assignment activity, and
+Theme activity. On mobile, use cards rather than forcing a wide operational
+table.
+
+Progressive disclosure rules:
+
+- default to current actionable work, not thousands of completed jobs;
+- show bounded excerpts and errors with explicit expand controls;
+- explain why evidence-unit count can be unknown before segmentation;
+- explain that theme queue entries trigger a global refresh;
+- display topic validation corrections as normal quality-control activity unless
+  the job ultimately fails;
+- link completed topic/theme names back to the relevant Overview taxonomy state
+  where possible.
+
+Do not add queue mutation buttons in this package.
+
+#### Accessibility and responsive behavior
+
+- Status is always communicated with text, not color alone.
+- Polling updates use a single polite live region with deduplicated messages.
+- Tables/cards retain logical reading and keyboard order.
+- Error details, tooltips, and explanatory disclosures are keyboard accessible.
+- The page works at 320px, 200% zoom, and with reduced motion.
+
+#### Acceptance criteria
+
+- Overview shows whether evidence processing is idle, progressing, retrying, or
+  blocked without opening a terminal.
+- An operator can identify which inputs are waiting and at what stage.
+- Recent topic decisions and theme changes are understandable without raw LLM
+  payloads.
+- The new detail route does not reintroduce a sidebar navigation item.
+
+### VIS-WP4 — Integration, reconciliation, and operational verification
+
+#### Objective
+
+Prove that displayed processing state remains trustworthy while workers update
+the queue concurrently.
+
+#### Verification
+
+- PostgreSQL integration tests covering enqueue, claim, heartbeat, retry,
+  terminal failure, completion, and rescheduling.
+- Reconciliation tests comparing API totals with direct durable-state fixtures.
+- Browser tests for empty, active, retrying, failed, recovered, and API-error
+  states.
+- Verify polling cancellation on disconnect, reduced/paused hidden-tab polling,
+  stale-response protection, and no focus loss during refresh.
+- Accessibility scans and keyboard/screen-reader review for the panel and detail
+  route.
+- Load test bounded list queries with representative job/audit history and add
+  indexes only where query plans demonstrate a need.
+- Update `docs/worker-queue.md` with the UI/API inspection path while retaining
+  SQL commands for break-glass operations.
+
+#### Acceptance criteria
+
+- UI totals reconcile with queue state throughout worker transitions.
+- Retry delay, active heartbeat, and terminal failure are represented correctly.
+- Theme refresh triggers are never presented as queued themes.
+- Visibility remains useful when one activity endpoint fails independently.
+- The feature introduces no queue-state mutation or worker contention.
 
 ## Decisions inherited from WP1
 
@@ -50,6 +537,11 @@ Future work must preserve these rules:
 ---
 
 ## WP3 — Article persistence, tagging, evidence, and approval state
+
+**Status: completed.** Migration `013_add_articles.sql` implements immutable
+revisions, canonical taxonomy links, revision-scoped evidence provenance, and
+the approval audit trail. The article API and real dashboard aggregates are
+deployed.
 
 ### Objective
 
@@ -187,6 +679,11 @@ are implemented here; WP4 otherwise owns that counter.
 ---
 
 ## WP4 — Safe templates and asynchronous article generation backend
+
+**Status: completed.** Migration `014_add_article_generation.sql` implements
+immutable template versions and frozen-evidence jobs. The API validates and
+sanitizes templates, the worker validates structured LLM output, and the
+durable leased queue creates `ready_for_review` articles atomically.
 
 ### Objective
 
@@ -420,7 +917,8 @@ The workflow should have progressive steps:
 2. **Target:** theme/topic choice with recommendation explanation and counts.
 3. **Evidence:** inspect the frozen candidate set and optionally deselect items
    if backend policy allows it.
-4. **Template:** select an active template version and preview its structure.
+4. **Template:** select an active template version and preview its structure;
+   any template-management subflow is entered and exited from this step.
 5. **Guidance:** optional bounded editorial instructions.
 6. **Confirm:** summarize target, evidence count, template, and tags.
 7. **Progress:** submit and poll the durable job.
@@ -470,6 +968,7 @@ request.
 - Strategy and target changes.
 - Stale/ineligible target response.
 - Template selection and preview errors.
+- Nested template management preserves and restores generation state.
 - Job submission payload.
 - Polling completion, failure, retry, refresh recovery, and cancellation on
   disconnect.
@@ -479,6 +978,7 @@ request.
 
 - All three required generation strategies are usable on mobile and desktop.
 - Evidence is inspectable before generation.
+- Templates are only accessible within this workflow.
 - Refreshing during generation does not lose the job.
 - Success produces a `ready_for_review` article and opens it for review.
 - Generation never performs approval.
@@ -557,19 +1057,20 @@ After save, approval, return-to-draft, or archive:
 
 ---
 
-## WP10 — Template and form-source administration frontend
+## WP10 — In-workflow template and form-source administration frontend
 
 **Status: partially completed.** Form-source administration is implemented;
 template administration remains outstanding.
 
 ### Objective
 
-Replace the `/templates` and `/forms` placeholders after WP4 and WP5 APIs are
-available.
+Provide template administration inside WP8's Template step and replace the
+`/forms` placeholder after WP4 and WP5 APIs are available. Do not create a
+standalone Templates navigation destination.
 
-### Template screens
+### Template subflow
 
-Implement:
+From the generation workflow's Template step, implement:
 
 - template list with active/archived state;
 - create-template form;
@@ -584,6 +1085,8 @@ rich-text or code-editor dependency unless explicitly approved. Display server
 validation errors at the relevant field and in a summary.
 
 Preview must use the same isolated rendering policy as article preview.
+Returning from this subflow must preserve the in-progress generation request.
+After this subflow is usable, NAV-WP3 removes the standalone `/templates` route.
 
 ### Form screens
 
@@ -614,7 +1117,9 @@ on the server.
 
 ### Acceptance criteria
 
-- Administrators can manage templates without changing code or SQL.
+- Administrators can manage templates from article generation without changing
+  code or SQL.
+- Templates have no standalone primary-navigation destination.
 - Administrators can register and monitor forms without changing SQL.
 - Unsafe templates never execute in the dashboard context.
 - Google credentials remain outside the browser and API.
@@ -661,10 +1166,11 @@ to add that development dependency. Critical flows:
 
 ```text
 dashboard → filter/sort/page → inspect evidence
+dashboard → processing activity → inspect queue/topic/theme details
 dashboard → recommended target → generate → recover polling → review
 review → inspect provenance → approve → dashboard coverage changes
 forms → register source → see status
-templates → create version → preview → use for generation
+generate → template step → create version → preview → return to generation
 ```
 
 Run at least at 320px, a tablet width, and a desktop width. Verify keyboard
@@ -750,6 +1256,9 @@ variables, volumes, backup/restore, and model startup behavior.
 
 Add structured logging and operational views for:
 
+- evidence-pipeline queue depth, retry age, and failures by stage;
+- topic assignment validation-correction and terminal-failure counts;
+- theme refresh health and pending materialization count;
 - article generation queue depth and failures;
 - average generation duration;
 - form polling failures and cursor age;

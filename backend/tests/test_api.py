@@ -14,6 +14,13 @@ class ApiStructureTests(unittest.TestCase):
     def test_inputs_route_is_registered(self):
         self.assertIn("/inputs", app.openapi()["paths"])
 
+    def test_article_and_generation_routes_are_registered(self):
+        paths = app.openapi()["paths"]
+        self.assertIn("/articles", paths)
+        self.assertIn("/articles/{article_id}/approve", paths)
+        self.assertIn("/article-templates", paths)
+        self.assertIn("/article-generation-jobs", paths)
+
 
 class FakeDatabase:
     def __init__(self) -> None:

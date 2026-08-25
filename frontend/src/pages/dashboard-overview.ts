@@ -148,14 +148,6 @@ export class DashboardOverview extends HTMLElement {
       : "Explore classifications, coverage, and the original evidence behind them.";
     copy.append(eyebrow, heading, description);
     header.append(copy);
-    if (this.#view === "overview") {
-      const generate = document.createElement("a");
-      generate.href = "/generate";
-      generate.dataset.route = "";
-      generate.className = "primary-link";
-      generate.textContent = "Generate article";
-      header.append(generate);
-    }
     requestAnimationFrame(() => heading.focus());
     return header;
   }

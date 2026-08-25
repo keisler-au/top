@@ -9,6 +9,7 @@ from triage_processor.workers.topics import (
     TopicDecision,
     TopicReviewDecision,
     TopicReviewFinding,
+    _group_topic_candidates,
     _review_validation_errors,
     process_next_input,
 )
@@ -111,6 +112,47 @@ class FakeAssigner:
 
 
 class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
+    def test_groups_nearest_evidence_by_topic(self):
+        candidates = _group_topic_candidates(
+            [
+                {
+                    "evidence_type": "segment",
+                    "evidence_id": 1,
+                    "text": "An indoor park",
+                    "topic": "Indoor Green Spaces",
+                    "similarity": 0.9,
+                    "scope": "same_question",
+                },
+                {
+                    "evidence_type": "segment",
+                    "evidence_id": 2,
+                    "text": "Plants and somewhere to relax",
+                    "topic": "indoor green spaces",
+                    "similarity": 0.8,
+                    "scope": "global",
+                },
+                {
+                    "evidence_type": "original",
+                    "evidence_id": 3,
+                    "text": "A yoga room",
+                    "topic": "Wellbeing Spaces",
+                    "similarity": 0.7,
+                    "scope": "global",
+                },
+            ],
+            limit=2,
+        )
+
+        self.assertEqual(
+            [candidate["name"] for candidate in candidates],
+            ["Indoor Green Spaces", "Wellbeing Spaces"],
+        )
+        self.assertEqual(
+            len(candidates[0]["representative_evidence"]),
+            2,
+        )
+        self.assertEqual(candidates[0]["best_similarity"], 0.9)
+
     async def test_local_topic_llm_client_constructs(self):
         client = LocalTopicLLMClient(
             base_url="http://localhost:11434/v1",
@@ -190,18 +232,23 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.fetchrow_values, [(10,)])
         self.assertEqual(
             assigner.context["existing_topics"],
-            ["Housing", "Transport"],
+            [
+                {"name": "Housing", "usage_count": 5},
+                {"name": "Transport", "usage_count": 3},
+            ],
         )
         self.assertNotIn("embedding", assigner.context["targets"][0])
         self.assertIsNone(assigner.context["targets"][0]["question_text"])
         self.assertEqual(
-            assigner.context["targets"][0]["similar_evidence"][0]["scope"],
+            assigner.context["targets"][0]["topic_candidates"][0][
+                "representative_evidence"
+            ][0]["scope"],
             "global",
         )
         self.assertEqual(
-            assigner.context["targets"][0]["similar_evidence"][0][
-                "evidence_type"
-            ],
+            assigner.context["targets"][0]["topic_candidates"][0][
+                "representative_evidence"
+            ][0]["evidence_type"],
             "original",
         )
         self.assertIn(
@@ -283,7 +330,7 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             [question_text, question_text],
         )
         self.assertEqual(
-            assigner.context["targets"][0]["similar_evidence"],
+            assigner.context["targets"][0]["topic_candidates"],
             [],
         )
         self.assertEqual(
@@ -335,7 +382,7 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(
-            assigner.context["targets"][0]["similar_evidence"],
+            assigner.context["targets"][0]["topic_candidates"],
             [],
         )
         self.assertEqual(len(connection.evidence_requests), 1)
@@ -391,7 +438,12 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             topic_limit=50,
         )
 
-        evidence = assigner.context["targets"][0]["similar_evidence"]
+        candidates = assigner.context["targets"][0]["topic_candidates"]
+        evidence = [
+            item
+            for candidate in candidates
+            for item in candidate["representative_evidence"]
+        ]
         self.assertEqual(
             [item["scope"] for item in evidence],
             ["same_question", "global"],

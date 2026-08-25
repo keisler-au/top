@@ -132,7 +132,7 @@ class DashboardApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("/recommendations/articles", paths)
 
-    async def test_summary_returns_real_taxonomy_and_transitional_article_counts(
+    async def test_summary_returns_taxonomy_and_article_counts(
         self,
     ) -> None:
         response = await self.client.get("/dashboard/summary")

@@ -37,6 +37,15 @@ function normalizedPath(pathname: string): string {
   return pathname.replace(/\/+$/, "") || "/";
 }
 
+export function legacyRedirectUrl(
+  location: Pick<Location, "pathname" | "search" | "hash">,
+): string | null {
+  if (normalizedPath(location.pathname) !== "/taxonomy") {
+    return null;
+  }
+  return `/${location.search}${location.hash}`;
+}
+
 export function matchRoute(location: Pick<Location, "pathname" | "search">): RouteMatch {
   const pathname = normalizedPath(location.pathname);
   const pathSegments = pathname.split("/").filter(Boolean);
@@ -151,6 +160,10 @@ export class Router extends EventTarget {
   };
 
   #publish(): void {
+    const redirect = legacyRedirectUrl(window.location);
+    if (redirect !== null) {
+      window.history.replaceState({}, "", redirect);
+    }
     this.#current = matchRoute(window.location);
     this.dispatchEvent(
       new CustomEvent<RouteMatch>("route-change", {

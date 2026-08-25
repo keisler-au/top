@@ -4,13 +4,12 @@ The dashboard endpoints implement the metric and ranking rules in
 [`dashboard-product-contract.md`](dashboard-product-contract.md). They read
 only committed, completed evidence and never wait for background workers.
 
-## Current article-count behavior
+## Article-count behavior
 
-Article persistence is not part of WP2. Until the article schema is added,
-`article_count`, `approved_article_count`, `awaiting_approval_count`, and
-`failed_generation_count` are returned as `0`. These fields are present now so
-the frontend contract does not need to change when article aggregates are
-introduced.
+Article counters are read from the durable article and generation tables.
+Archived articles are excluded from active and taxonomy counts, only approved
+articles contribute to approved coverage, and unresolved failed generation
+jobs contribute to `failed_generation_count`.
 
 ## Summary
 
@@ -71,4 +70,3 @@ GET /recommendations/articles?type=topic&strategy=least-covered&limit=5
 `limit` is between 1 and 20. Recommendations contain only taxonomy items with
 canonical evidence and include a human-readable explanation generated from
 the returned counts.
-
