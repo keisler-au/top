@@ -4,8 +4,12 @@ from triage_processor.workers.low_information import is_low_information
 from triage_processor.workers.topics import (
     LocalTopicLLMClient,
     SegmentTopicAssignment,
+    TopicAssignmentResult,
     TopicChoice,
     TopicDecision,
+    TopicReviewDecision,
+    TopicReviewFinding,
+    _review_validation_errors,
     process_next_input,
 )
 
@@ -39,6 +43,7 @@ class FakeConnection:
         self.fetchrow_values = []
         self.evidence_requests = []
         self.evidence_queries = []
+        self.topic_attempts = []
 
     def transaction(self):
         return AsyncContext(None)
@@ -66,6 +71,9 @@ class FakeConnection:
         return self.segments
 
     async def execute(self, query, *values):
+        if "INSERT INTO topic_assignment_attempts" in query:
+            self.topic_attempts.append(values)
+            return
         self.executed.append((query, values))
 
     async def executemany(self, query, values):
@@ -81,16 +89,25 @@ class FakePool:
 
 
 class FakeAssigner:
-    def __init__(self, decision=None, error=None):
-        self.decision = decision
+    def __init__(self, decision=None, error=None, decisions=None):
+        self.decisions = list(decisions or ([decision] if decision else []))
         self.error = error
         self.context = None
+        self.corrections = []
 
-    async def assign(self, context):
+    async def assign(self, context, *, correction=None):
         self.context = context
+        self.corrections.append(correction)
         if self.error:
             raise self.error
-        return self.decision
+        decision = self.decisions.pop(0) if len(self.decisions) > 1 else self.decisions[0]
+        raw_response = decision.model_dump(mode="json")
+        return TopicAssignmentResult(
+            decision=decision,
+            raw_response=raw_response,
+            model="fake-model",
+            prompt_version="test-prompt",
+        )
 
 
 class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
@@ -399,16 +416,7 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
                 original_topic=TopicChoice(
                     name="Libraries",
                     reused_existing=False,
-                ),
-                segment_topics=[
-                    SegmentTopicAssignment(
-                        segment_id=999,
-                        topic=TopicChoice(
-                            name="Irrelevant segment",
-                            reused_existing=False,
-                        ),
-                    )
-                ],
+                )
             )
         )
 
@@ -422,6 +430,42 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(processed)
         self.assertEqual(connection.segment_updates, [])
         self.assertEqual(connection.executed[0][1], (11, "Libraries"))
+
+    async def test_unrequested_segment_assignment_is_rejected(self):
+        connection = FakeConnection(
+            original={
+                "id": 21,
+                "original_text": "Libraries",
+                "embedding": "[1,1]",
+                "embedding_model": "embeddinggemma",
+            }
+        )
+        assigner = FakeAssigner(
+            TopicDecision(
+                original_topic=TopicChoice(
+                    name="Libraries",
+                    reused_existing=False,
+                ),
+                segment_topics=[
+                    SegmentTopicAssignment(
+                        segment_id=21,
+                        topic=TopicChoice(
+                            name="Libraries",
+                            reused_existing=False,
+                        ),
+                    )
+                ],
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "when no segments"):
+            await process_next_input(
+                FakePool(connection),
+                assigner,
+                similar_limit=5,
+                topic_limit=50,
+                validation_attempts=1,
+            )
 
     async def test_missing_original_embedding_stops_processing(self):
         connection = FakeConnection(
@@ -525,7 +569,7 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.executed, [])
         self.assertEqual(connection.segment_updates, [])
 
-    async def test_unknown_reused_topic_becomes_a_new_topic(self):
+    async def test_invalid_reuse_is_corrected_and_audited(self):
         connection = FakeConnection(
             original={
                 "id": 14,
@@ -536,12 +580,20 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             topics=[{"topic": "Known", "usage_count": 1}],
         )
         assigner = FakeAssigner(
-            TopicDecision(
-                original_topic=TopicChoice(
-                    name="Unknown",
-                    reused_existing=True,
+            decisions=[
+                TopicDecision(
+                    original_topic=TopicChoice(
+                        name="Unknown",
+                        reused_existing=True,
+                    )
+                ),
+                TopicDecision(
+                    original_topic=TopicChoice(
+                        name="Unknown Category",
+                        reused_existing=False,
+                    )
                 )
-            )
+            ]
         )
 
         await process_next_input(
@@ -551,7 +603,87 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
             topic_limit=50,
         )
 
-        self.assertEqual(connection.executed[0][1], (14, "Unknown"))
+        self.assertEqual(connection.executed[0][1], (14, "Unknown Category"))
+        self.assertEqual(len(connection.topic_attempts), 2)
+        self.assertFalse(connection.topic_attempts[0][-1])
+        self.assertTrue(connection.topic_attempts[1][-1])
+        self.assertIsNone(assigner.corrections[0])
+        self.assertIn(
+            "claims unknown topic",
+            assigner.corrections[1]["validation_errors"][0],
+        )
+
+    async def test_verbatim_sentence_topic_is_corrected(self):
+        connection = FakeConnection(
+            original={
+                "id": 19,
+                "original_text": "sign up to the newsletter",
+                "embedding": "[1,0]",
+                "embedding_model": "embeddinggemma",
+            }
+        )
+        assigner = FakeAssigner(
+            decisions=[
+                TopicDecision(
+                    original_topic=TopicChoice(
+                        name="sign up to the newsletter",
+                        reused_existing=False,
+                    )
+                ),
+                TopicDecision(
+                    original_topic=TopicChoice(
+                        name="Newsletter Participation",
+                        reused_existing=False,
+                    )
+                ),
+            ]
+        )
+
+        await process_next_input(
+            FakePool(connection),
+            assigner,
+            similar_limit=5,
+            topic_limit=50,
+        )
+
+        first_errors = connection.topic_attempts[0][-2]
+        self.assertTrue(
+            any("copied evidence verbatim" in error for error in first_errors)
+        )
+        self.assertEqual(
+            connection.executed[0][1],
+            (19, "Newsletter Participation"),
+        )
+
+    async def test_existing_topic_marked_new_is_rejected(self):
+        connection = FakeConnection(
+            original={
+                "id": 20,
+                "original_text": "More buses",
+                "embedding": "[1,0]",
+                "embedding_model": "embeddinggemma",
+            },
+            topics=[{"topic": "Public Transport", "usage_count": 1}],
+        )
+        assigner = FakeAssigner(
+            TopicDecision(
+                original_topic=TopicChoice(
+                    name="Public Transport",
+                    reused_existing=False,
+                )
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "marked existing topic"):
+            await process_next_input(
+                FakePool(connection),
+                assigner,
+                similar_limit=5,
+                topic_limit=50,
+                validation_attempts=1,
+            )
+
+        self.assertFalse(connection.topic_attempts[0][-1])
 
     async def test_no_ready_input_does_nothing(self):
         connection = FakeConnection(original=None)
@@ -572,6 +704,33 @@ class TopicWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(is_low_information("Price"))
         self.assertFalse(is_low_information("123456789012345"))
         self.assertFalse(is_low_information("A detailed response"))
+
+    def test_review_rejects_unsupported_specificity_and_granularity(self):
+        review = TopicReviewDecision(
+            original_topic=TopicReviewFinding(
+                supported=False,
+                appropriate_granularity=False,
+                suggested_name="Project updates",
+                reason="The target asks for updates but names no newsletter",
+            )
+        )
+
+        errors = _review_validation_errors(
+            review,
+            [
+                {
+                    "kind": "original",
+                    "id": 9,
+                    "text": "keep up with updates",
+                    "question_text": "How would you like to be involved?",
+                }
+            ],
+        )
+
+        self.assertEqual(len(errors), 2)
+        self.assertIn("unsupported", errors[0])
+        self.assertIn("inappropriate topic granularity", errors[1])
+        self.assertIn("Project updates", errors[1])
 
 
 if __name__ == "__main__":

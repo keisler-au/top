@@ -68,15 +68,19 @@ class FakeSegmenter:
 
 class FakeStructuredClient:
     def __init__(self, result):
-        self.result = result
+        self.results = list(result) if isinstance(result, list) else [result]
         self.system_prompt = None
         self.user_content = None
+        self.user_contents = []
         self.closed = False
 
     async def complete(self, *, system_prompt, user_content):
         self.system_prompt = system_prompt
         self.user_content = user_content
-        return self.result
+        self.user_contents.append(user_content)
+        if len(self.results) > 1:
+            return self.results.pop(0)
+        return self.results[0]
 
     async def close(self):
         self.closed = True
@@ -274,13 +278,48 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connection.inserted_segments, [])
         self.assertEqual(connection.executed, [])
 
-    def test_treats_a_single_segment_as_unsplit(self):
+    def test_normalizes_a_single_segment_as_unsplit(self):
         decision = SegmentationDecision(
             eligible=True,
             segments=["Only segment"],
         )
 
         self.assertEqual(decision.segments, [])
+
+    async def test_dependent_qualifier_triggers_corrective_retry(self):
+        answer = (
+            "A large indoor climbing hall that caters to beginners "
+            "and experienced climbers."
+        )
+        client = LocalLLMClient(
+            base_url="http://localhost:11434/v1",
+            model="test-model",
+            timeout_seconds=1,
+        )
+        structured_client = FakeStructuredClient(
+            [
+                {
+                    "eligible": True,
+                    "segments": [
+                        "A large indoor climbing hall",
+                        "that caters to beginners and experienced climbers",
+                    ],
+                },
+                {"eligible": True, "segments": []},
+            ]
+        )
+        await client._client.close()
+        client._client = structured_client
+
+        decision = await client.classify(
+            answer,
+            "What facility would you like to see?",
+        )
+        await client.close()
+
+        self.assertEqual(decision.segments, [])
+        correction = json.loads(structured_client.user_contents[1])["correction"]
+        self.assertIn("dependent clause", correction["validation_errors"][0])
 
     def test_rejects_segments_for_ineligible_input(self):
         with self.assertRaises(ValueError):

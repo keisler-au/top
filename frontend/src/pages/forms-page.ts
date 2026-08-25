@@ -53,21 +53,10 @@ export class FormsPage extends HTMLElement {
     description.textContent = "Register Google Sheets response tabs for the poller to scan.";
     header.append(eyebrow, heading, description);
 
-    const setupNotice = document.createElement("ui-alert");
-    setupNotice.setAttribute("tone", "warning");
-    const noticeTitle = document.createElement("strong");
-    noticeTitle.textContent = "Server setup is required";
-    const noticeText = document.createElement("p");
-    noticeText.textContent = (
-      "Share the spreadsheet with the configured Google service account, "
-      + "mount its credentials on the server, and run the google-sheets Compose profile."
-    );
-    setupNotice.append(noticeTitle, noticeText);
-
     const layout = document.createElement("div");
     layout.className = "forms-layout";
     layout.append(this.#registrationPanel(), this.#sourcesPanel());
-    this.append(header, setupNotice, layout);
+    this.append(header, layout);
     requestAnimationFrame(() => heading.focus());
   }
 

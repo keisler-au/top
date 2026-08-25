@@ -33,17 +33,30 @@ export class DashboardOverview extends HTMLElement {
   #searchInput: HTMLInputElement | null = null;
   #sortSelect: HTMLSelectElement | null = null;
   #typeButtons: HTMLButtonElement[] = [];
+  #refreshTimer: number | null = null;
 
   connectedCallback(): void {
     this.#state = dashboardState(new URLSearchParams(window.location.search));
     this.#renderShell();
     void this.#loadInitialData();
+    this.#refreshTimer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void this.#loadTaxonomy(false, true);
+      if (this.#view === "overview") {
+        void this.#loadSummary(false, true);
+        void this.#loadRecommendations(false, true);
+      }
+    }, 5_000);
   }
 
   disconnectedCallback(): void {
     this.#summaryController?.abort();
     this.#taxonomyController?.abort();
     this.#recommendationController?.abort();
+    if (this.#refreshTimer !== null) {
+      window.clearInterval(this.#refreshTimer);
+      this.#refreshTimer = null;
+    }
   }
 
   get #view(): DashboardView {
@@ -285,7 +298,7 @@ export class DashboardOverview extends HTMLElement {
     }
   }
 
-  async #loadSummary(): Promise<void> {
+  async #loadSummary(showErrors = true, force = false): Promise<void> {
     if (!this.#summaryContent) return;
     this.#summaryController?.abort();
     const controller = new AbortController();
@@ -294,8 +307,9 @@ export class DashboardOverview extends HTMLElement {
       const summary = await queryStore.fetch(
         "dashboard:summary",
         () => api.summary({ signal: controller.signal }),
+        { force },
       );
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && showErrors) {
         this.#renderSummary(summary);
         this.#renderAttention(summary);
       }
@@ -380,19 +394,22 @@ export class DashboardOverview extends HTMLElement {
     return item;
   }
 
-  async #loadTaxonomy(): Promise<void> {
+  async #loadTaxonomy(showLoading = true, force = false): Promise<void> {
     if (!this.#coverageContent) return;
     this.#taxonomyController?.abort();
     const controller = new AbortController();
     this.#taxonomyController = controller;
-    this.#renderSectionLoading(this.#coverageContent, "Loading coverage…");
-    this.#pagination?.replaceChildren();
+    if (showLoading) {
+      this.#renderSectionLoading(this.#coverageContent, "Loading coverage…");
+      this.#pagination?.replaceChildren();
+    }
     const query = stateAsQuery(this.#state);
     const cacheKey = `taxonomy:${stateAsSearch(this.#state)}`;
     try {
       const response = await queryStore.fetch(
         cacheKey,
         () => api.taxonomy(query, { signal: controller.signal }),
+        { force },
       );
       if (controller.signal.aborted) return;
       const pages = pageCount(response.total, response.page_size);
@@ -403,7 +420,7 @@ export class DashboardOverview extends HTMLElement {
       this.#renderTaxonomy(response.items, response.total);
       this.#renderPagination(response.total);
     } catch (error) {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && showLoading) {
         this.#renderError(this.#coverageContent, error, () => void this.#loadTaxonomy());
       }
     }
@@ -606,7 +623,7 @@ export class DashboardOverview extends HTMLElement {
     });
   }
 
-  async #loadRecommendations(): Promise<void> {
+  async #loadRecommendations(showErrors = true, force = false): Promise<void> {
     if (!this.#recommendations) return;
     this.#recommendationController?.abort();
     const controller = new AbortController();
@@ -622,6 +639,7 @@ export class DashboardOverview extends HTMLElement {
             3,
             { signal: controller.signal },
           ),
+          { force },
         ),
         queryStore.fetch(
           `recommendations:${this.#state.type}:least-covered`,
@@ -631,9 +649,10 @@ export class DashboardOverview extends HTMLElement {
             3,
             { signal: controller.signal },
           ),
+          { force },
         ),
       ]);
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && showErrors) {
         this.#renderRecommendations(most.items, least.items);
       }
     } catch (error) {
