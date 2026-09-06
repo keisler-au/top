@@ -3,7 +3,6 @@ export type RouteName =
   | "taxonomy"
   | "articles"
   | "article"
-  | "templates"
   | "forms"
   | "generate"
   | "not-found";
@@ -25,7 +24,6 @@ export const routes: readonly RouteDefinition[] = [
   { name: "taxonomy", pattern: "/taxonomy", title: "Themes & topics" },
   { name: "articles", pattern: "/articles", title: "Articles" },
   { name: "article", pattern: "/articles/:id", title: "Article" },
-  { name: "templates", pattern: "/templates", title: "Templates" },
   { name: "forms", pattern: "/forms", title: "Forms" },
   { name: "generate", pattern: "/generate", title: "Generate article" },
 ] as const;
@@ -40,6 +38,10 @@ function normalizedPath(pathname: string): string {
 export function legacyRedirectUrl(
   location: Pick<Location, "pathname" | "search" | "hash">,
 ): string | null {
+  if (normalizedPath(location.pathname) === "/templates") {
+    // A legacy template URL has no validated generation request state.
+    return "/generate";
+  }
   if (normalizedPath(location.pathname) !== "/taxonomy") {
     return null;
   }

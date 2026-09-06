@@ -1,6 +1,11 @@
 import unittest
 
+from pydantic import ValidationError
+
+from triage_processor.api.article_schemas import ArticlePatch, ArticlePreviewRequest
 from triage_processor.api.generation_schemas import GeneratedArticle
+from triage_processor.api.routes.articles import article_order_by
+from triage_processor.api.routes.generation import _template_version
 from triage_processor.articles import normalize_topic
 from triage_processor.templates import render_template, sanitize_html, validate_template_source
 from triage_processor.workers.article_generation import (
@@ -46,6 +51,22 @@ class FakePool:
 
 
 class TemplateSecurityTests(unittest.TestCase):
+    def test_template_version_response_includes_source_and_article_usage(self):
+        response = _template_version(
+            {
+                "id": 8,
+                "version": 2,
+                "html_source": "<article>{{title}}{{article_body}}</article>",
+                "allowed_placeholders": ["title", "article_body"],
+                "used_by_article_count": 3,
+                "created_by": "Editor",
+                "created_at": "2026-09-03T10:00:00Z",
+            }
+        )
+
+        self.assertEqual(response.html_source, "<article>{{title}}{{article_body}}</article>")
+        self.assertEqual(response.used_by_article_count, 3)
+
     def test_validates_and_renders_escaped_structured_content(self):
         source = (
             "<article><h1>{{title}}</h1><p>{{standfirst}}</p>"
@@ -197,6 +218,39 @@ class TopicNormalizationTests(unittest.TestCase):
             normalize_topic("  Cost  Barriers  "),
             ("cost  barriers", "Cost  Barriers"),
         )
+
+
+class EditorialApiContractTests(unittest.TestCase):
+    def test_article_sorting_uses_fixed_server_owned_order_clauses(self):
+        self.assertEqual(
+            article_order_by("updated", "desc"),
+            "articles.updated_at DESC, articles.id DESC",
+        )
+        self.assertEqual(
+            article_order_by("title", "asc"),
+            "lower(articles.title) ASC, articles.id ASC",
+        )
+        self.assertEqual(
+            article_order_by("status", "desc"),
+            "articles.status DESC, articles.updated_at DESC, articles.id DESC",
+        )
+
+    def test_editor_payloads_carry_a_positive_expected_revision(self):
+        patch = ArticlePatch.model_validate(
+            {"title": "Updated", "expected_revision_id": 12}
+        )
+        preview = ArticlePreviewRequest.model_validate(
+            {
+                "title": "Updated",
+                "structured_content": {"sections": []},
+                "expected_revision_id": 12,
+            }
+        )
+
+        self.assertEqual(patch.expected_revision_id, 12)
+        self.assertEqual(preview.expected_revision_id, 12)
+        with self.assertRaises(ValidationError):
+            ArticlePatch.model_validate({"expected_revision_id": 0})
 
 
 class GenerationQueueTests(unittest.IsolatedAsyncioTestCase):

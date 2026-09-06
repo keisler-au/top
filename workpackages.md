@@ -1,5 +1,9 @@
 # Question-Context Implementation Plan (v3)
 
+**Status: implemented.** This is the historical question-context pipeline plan.
+Its WP8 is form/question/submission retrieval and is unrelated to Dashboard WP8
+in `docs/dashboard-remaining-work-packages.md`.
+
 This revision retains v2's question-context design and tightens the WP6/WP7
 theme flow: topic aggregation now uses complete, stable membership;
 suggestions have durable materialization state and backlog replay; update and

@@ -1,5 +1,5 @@
 import json
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -10,6 +10,8 @@ from triage_processor.api.article_schemas import (
     ArticleEvidenceResponse,
     ArticleListResponse,
     ArticlePatch,
+    ArticlePreviewRequest,
+    ArticlePreviewResponse,
     ArticleResponse,
     ArticleRevisionResponse,
     ArticleTopic,
@@ -22,10 +24,23 @@ from triage_processor.articles import (
     normalize_topic,
     resolve_evidence,
 )
-from triage_processor.templates import sanitize_html
+from triage_processor.templates import render_template, sanitize_html
 
 router = APIRouter(prefix="/articles", tags=["articles"])
 MAX_PAGE_OFFSET = 100_000
+
+ARTICLE_ORDER_BY = {
+    ("updated", "desc"): "articles.updated_at DESC, articles.id DESC",
+    ("updated", "asc"): "articles.updated_at ASC, articles.id ASC",
+    ("title", "asc"): "lower(articles.title) ASC, articles.id ASC",
+    ("title", "desc"): "lower(articles.title) DESC, articles.id DESC",
+    ("status", "asc"): "articles.status ASC, articles.updated_at DESC, articles.id DESC",
+    ("status", "desc"): "articles.status DESC, articles.updated_at DESC, articles.id DESC",
+}
+
+
+def article_order_by(sort: str, direction: str) -> str:
+    return ARTICLE_ORDER_BY[(sort, direction)]
 
 
 def _json_object(value: Any) -> dict[str, Any] | None:
@@ -149,6 +164,8 @@ async def list_articles(
     theme_id: Annotated[int | None, Query(ge=1)] = None,
     topic: str | None = None,
     search: str | None = None,
+    sort: Literal["updated", "title", "status"] = "updated",
+    direction: Literal["asc", "desc"] = "desc",
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> ArticleListResponse:
@@ -183,7 +200,7 @@ async def list_articles(
             f"""
             SELECT articles.id FROM articles
             WHERE {predicate}
-            ORDER BY articles.updated_at DESC, articles.id DESC
+            ORDER BY {article_order_by(sort, direction)}
             OFFSET $5 LIMIT $6
             """,
             lifecycle_status,
@@ -208,6 +225,50 @@ async def get_article(article_id: int, request: Request) -> ArticleResponse:
     if response is None:
         raise _article_not_found()
     return response
+
+
+@router.post("/{article_id}/preview", response_model=ArticlePreviewResponse)
+async def preview_article(
+    article_id: int,
+    payload: ArticlePreviewRequest,
+    request: Request,
+) -> ArticlePreviewResponse:
+    async with request.app.state.db_pool.acquire() as connection:
+        row = await connection.fetchrow(
+            """
+            SELECT revisions.id, versions.html_source
+            FROM articles
+            JOIN article_revisions AS revisions
+                ON revisions.id = articles.current_revision_id
+            LEFT JOIN article_template_versions AS versions
+                ON versions.id = revisions.template_version_id
+            WHERE articles.id = $1
+            """,
+            article_id,
+        )
+    if row is None:
+        raise _article_not_found()
+    if payload.expected_revision_id is not None and row["id"] != payload.expected_revision_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="article changed since it was loaded; refresh before previewing",
+        )
+    if row["html_source"] is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="article revision has no template and cannot be previewed",
+        )
+    try:
+        rendered = render_template(
+            row["html_source"],
+            {**payload.structured_content, "title": payload.title},
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"invalid structured article content: {error}",
+        ) from error
+    return ArticlePreviewResponse(rendered_html=rendered)
 
 
 async def _current_evidence(
@@ -280,6 +341,14 @@ async def patch_article(
                     raise HTTPException(
                         status_code=409,
                         detail="only draft articles can be edited",
+                    )
+                if (
+                    payload.expected_revision_id is not None
+                    and current["current_revision_id"] != payload.expected_revision_id
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="article changed since it was loaded; refresh before saving",
                     )
 
                 fields = payload.model_fields_set
@@ -529,13 +598,26 @@ async def article_evidence(article_id: int, request: Request) -> list[ArticleEvi
             SELECT evidence.id, evidence.evidence_order, evidence.citation_id,
                    evidence.topic_key, evidence.original_input_id,
                    evidence.segment_input_id,
-                   COALESCE(segments.segment_text, inputs.original_text) AS text,
-                   COALESCE(segments.original_input_id, inputs.id) AS source_input_id
+                   COALESCE(segments.segment_text, source_inputs.original_text) AS text,
+                   source_inputs.id AS source_input_id,
+                   source_inputs.original_text,
+                   COALESCE(segments.topic, source_inputs.topic) AS topic_name,
+                   source_inputs.source,
+                   source_inputs.submission_key,
+                   questions.form_key,
+                   questions.question_key,
+                   questions.question_version,
+                   questions.question_text
             FROM articles
             JOIN article_evidence AS evidence
                 ON evidence.revision_id = articles.current_revision_id
-            LEFT JOIN original_inputs AS inputs ON inputs.id = evidence.original_input_id
             LEFT JOIN segment_inputs AS segments ON segments.id = evidence.segment_input_id
+            JOIN original_inputs AS source_inputs
+                ON source_inputs.id = COALESCE(
+                    evidence.original_input_id,
+                    segments.original_input_id
+                )
+            LEFT JOIN questions ON questions.id = source_inputs.question_id
             WHERE articles.id = $1
             ORDER BY evidence.evidence_order
             """,
@@ -553,6 +635,23 @@ async def article_evidence(article_id: int, request: Request) -> list[ArticleEvi
             topic_key=row["topic_key"],
             text=row["text"],
             original_input_id=row["source_input_id"],
+            evidence_type=(
+                "segment" if row["segment_input_id"] is not None else "original"
+            ),
+            original_text=row["original_text"],
+            topic_name=row["topic_name"],
+            source=row["source"],
+            submission_key=row["submission_key"],
+            question_context=(
+                {
+                    "form_key": row["form_key"],
+                    "question_key": row["question_key"],
+                    "question_version": row["question_version"],
+                    "question_text": row["question_text"],
+                }
+                if row["question_key"] is not None
+                else None
+            ),
         )
         for row in rows
     ]

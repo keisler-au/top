@@ -1,15 +1,30 @@
 import type {
+  Article,
+  ArticleAudit,
+  ArticleEvidence,
+  ArticlePatch,
+  ArticlePreview,
+  ArticlePreviewRequest,
+  ArticleQuery,
+  ArticleTemplate,
+  ArticleTemplateCreate,
+  ArticleTemplateVersionCreate,
   DashboardSummary,
   EvidenceItem,
   FormSource,
   FormSourceCreate,
   FormSourceUpdate,
+  GenerationJob,
+  GenerationJobCreate,
   PageResponse,
   RecommendationResponse,
   RecommendationStrategy,
   TaxonomyItem,
   TaxonomyQuery,
   TaxonomyType,
+  TemplatePreview,
+  TemplatePreviewRequest,
+  ArticleTransition,
 } from "./contracts.js";
 import { ApiError } from "./errors.js";
 
@@ -146,6 +161,139 @@ export class ApiClient {
       limit: String(limit),
     });
     return this.#get(`/recommendations/articles?${parameters}`, options);
+  }
+
+  articleTemplates(options?: RequestOptions): Promise<ArticleTemplate[]> {
+    return this.#get("/article-templates", options);
+  }
+
+  createArticleTemplate(
+    payload: ArticleTemplateCreate,
+    options?: RequestOptions,
+  ): Promise<ArticleTemplate> {
+    return this.#post("/article-templates", payload, options);
+  }
+
+  createArticleTemplateVersion(
+    templateId: number,
+    payload: ArticleTemplateVersionCreate,
+    options?: RequestOptions,
+  ): Promise<ArticleTemplate> {
+    return this.#post(`/article-templates/${templateId}/versions`, payload, options);
+  }
+
+  archiveArticleTemplate(
+    templateId: number,
+    options?: RequestOptions,
+  ): Promise<ArticleTemplate> {
+    return this.#post(`/article-templates/${templateId}/archive`, undefined, options);
+  }
+
+  previewArticleTemplate(
+    templateId: number,
+    payload: TemplatePreviewRequest,
+    options?: RequestOptions,
+  ): Promise<TemplatePreview> {
+    return this.#post(
+      `/article-templates/${templateId}/preview`,
+      payload,
+      options,
+    );
+  }
+
+  createGenerationJob(
+    payload: GenerationJobCreate,
+    options?: RequestOptions,
+  ): Promise<GenerationJob> {
+    return this.#post("/article-generation-jobs", payload, options);
+  }
+
+  generationJob(
+    id: number,
+    options?: RequestOptions,
+  ): Promise<GenerationJob> {
+    return this.#get(`/article-generation-jobs/${id}`, options);
+  }
+
+  retryGenerationJob(
+    id: number,
+    options?: RequestOptions,
+  ): Promise<GenerationJob> {
+    return this.#post(`/article-generation-jobs/${id}/retry`, undefined, options);
+  }
+
+  dismissGenerationJob(
+    id: number,
+    options?: RequestOptions,
+  ): Promise<GenerationJob> {
+    return this.#post(`/article-generation-jobs/${id}/dismiss`, undefined, options);
+  }
+
+  generationJobs(
+    status?: GenerationJob["status"],
+    page = 1,
+    pageSize = 25,
+    options?: RequestOptions,
+  ): Promise<PageResponse<GenerationJob>> {
+    const parameters = new URLSearchParams({
+      page: String(page),
+      page_size: String(pageSize),
+    });
+    appendIfPresent(parameters, "status", status);
+    return this.#get(`/article-generation-jobs?${parameters}`, options);
+  }
+
+  articles(
+    query: ArticleQuery,
+    options?: RequestOptions,
+  ): Promise<PageResponse<Article>> {
+    const parameters = new URLSearchParams();
+    appendIfPresent(parameters, "status", query.status);
+    appendIfPresent(parameters, "theme_id", query.themeId);
+    appendIfPresent(parameters, "topic", query.topic?.trim());
+    appendIfPresent(parameters, "search", query.search?.trim());
+    appendIfPresent(parameters, "sort", query.sort);
+    appendIfPresent(parameters, "direction", query.direction);
+    appendIfPresent(parameters, "page", query.page);
+    appendIfPresent(parameters, "page_size", query.pageSize);
+    return this.#get(`/articles?${parameters}`, options);
+  }
+
+  article(id: number, options?: RequestOptions): Promise<Article> {
+    return this.#get(`/articles/${id}`, options);
+  }
+
+  articleEvidence(id: number, options?: RequestOptions): Promise<ArticleEvidence[]> {
+    return this.#get(`/articles/${id}/evidence`, options);
+  }
+
+  articleHistory(id: number, options?: RequestOptions): Promise<ArticleAudit[]> {
+    return this.#get(`/articles/${id}/history`, options);
+  }
+
+  previewArticle(
+    id: number,
+    payload: ArticlePreviewRequest,
+    options?: RequestOptions,
+  ): Promise<ArticlePreview> {
+    return this.#post(`/articles/${id}/preview`, payload, options);
+  }
+
+  updateArticle(
+    id: number,
+    payload: ArticlePatch,
+    options?: RequestOptions,
+  ): Promise<Article> {
+    return this.#patch(`/articles/${id}`, payload, options);
+  }
+
+  transitionArticle(
+    id: number,
+    action: "submit" | "approve" | "return-to-draft" | "archive",
+    payload: ArticleTransition = {},
+    options?: RequestOptions,
+  ): Promise<Article> {
+    return this.#post(`/articles/${id}/${action}`, payload, options);
   }
 
   formSources(

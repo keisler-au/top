@@ -36,7 +36,9 @@ class TemplatePreviewRequest(BaseModel):
 class TemplateVersionResponse(BaseModel):
     id: int
     version: int
+    html_source: str
     allowed_placeholders: list[str]
+    used_by_article_count: int
     created_by: str | None
     created_at: datetime
 
@@ -81,6 +83,13 @@ class GenerationJobResponse(BaseModel):
     status_url: str
     created_at: datetime
     updated_at: datetime
+
+
+class GenerationJobListResponse(BaseModel):
+    items: list[GenerationJobResponse]
+    total: int
+    page: int
+    page_size: int
 
 
 class GeneratedSection(BaseModel):

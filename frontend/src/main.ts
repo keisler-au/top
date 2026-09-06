@@ -7,5 +7,8 @@ import "./components/ui-status.js";
 import "./components/evidence-drawer.js";
 import "./pages/dashboard-overview.js";
 import "./pages/forms-page.js";
+import "./pages/generation-page.js";
+import "./pages/articles-page.js";
+import "./pages/article-detail-page.js";
 import "./pages/placeholder-page.js";
 import "./app-shell.js";

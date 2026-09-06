@@ -1,16 +1,17 @@
 # Article and generation API
 
-WP3 and WP4 provide the durable backend used by the future article-generation
-and editorial interfaces. Generated articles always start in
+WP3 and WP4 provide the durable backend used by the article-generation and
+editorial interfaces. Generated articles always start in
 `ready_for_review`; approval is a separate, audited request.
 
 ## Articles
 
 ```http
-GET    /articles?status=draft&theme_id=7&topic=cost%20barriers&page=1&page_size=25
+GET    /articles?status=draft&theme_id=7&topic=cost%20barriers&sort=updated&direction=desc&page=1&page_size=25
 POST   /articles
 GET    /articles/{id}
 PATCH  /articles/{id}
+POST   /articles/{id}/preview
 POST   /articles/{id}/submit
 POST   /articles/{id}/approve
 POST   /articles/{id}/return-to-draft
@@ -24,6 +25,13 @@ approved content is therefore never overwritten. Submission and approval
 require rendered content, at least one taxonomy tag, and canonical evidence.
 Transitions accept an optional `actor` and review `note` and append an audit
 event in the same transaction.
+
+Editor preview and patch requests may include `expected_revision_id`. A stale
+revision returns `409` rather than overwriting newer work. Preview renders
+structured content through the revision's frozen template and returns sanitized
+HTML; the dashboard displays it only in a sandboxed iframe. Article evidence
+responses include segment/original type, untouched source text, topic, source,
+submission, and question context for provenance display.
 
 Evidence IDs use `original:{id}` for unsplit inputs and `segment:{id}` for
 split inputs. Source rows use restrictive foreign keys so provenance cannot be
@@ -50,6 +58,7 @@ deleted; updates create a new version.
 ## Asynchronous generation
 
 ```http
+GET  /article-generation-jobs?status=failed&page=1&page_size=25
 POST /article-generation-jobs
 GET  /article-generation-jobs/{id}
 POST /article-generation-jobs/{id}/retry

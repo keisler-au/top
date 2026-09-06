@@ -180,9 +180,44 @@ forms-page {
   gap: var(--space-6);
 }
 
+generation-page {
+  display: grid;
+  gap: var(--space-6);
+}
+
+articles-page,
+article-detail-page {
+  display: grid;
+  gap: var(--space-6);
+}
+
+.generation-page-heading {
+  max-inline-size: 54rem;
+}
+
 .forms-layout {
   display: grid;
   gap: var(--space-6);
+}
+
+.article-workspace-layout,
+.article-workspace-main,
+.article-workspace-aside {
+  display: grid;
+  gap: var(--space-6);
+  min-inline-size: 0;
+}
+
+@media (min-width: 64rem) {
+  .article-workspace-layout {
+    align-items: start;
+    grid-template-columns: minmax(0, 1.65fr) minmax(18rem, 0.75fr);
+  }
+
+  .article-workspace-aside {
+    position: sticky;
+    inset-block-start: var(--space-6);
+  }
 }
 
 .dashboard-page-header {

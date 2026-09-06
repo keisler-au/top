@@ -51,6 +51,19 @@ class ArticlePatch(BaseModel):
     theme_ids: list[int] | None = None
     topics: list[ArticleTopic] | None = None
     evidence: list[ArticleEvidenceInput] | None = None
+    expected_revision_id: int | None = Field(default=None, ge=1)
+
+
+class ArticlePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: Annotated[NonemptyText, StringConstraints(max_length=500)]
+    structured_content: dict[str, Any]
+    expected_revision_id: int | None = Field(default=None, ge=1)
+
+
+class ArticlePreviewResponse(BaseModel):
+    rendered_html: str
 
 
 class ArticleTransition(BaseModel):
@@ -100,6 +113,12 @@ class ArticleEvidenceResponse(BaseModel):
     topic_key: str
     text: str
     original_input_id: int
+    evidence_type: Literal["original", "segment"]
+    original_text: str
+    topic_name: str
+    source: str
+    submission_key: str | None
+    question_context: dict[str, Any] | None
 
 
 class ArticleAuditResponse(BaseModel):

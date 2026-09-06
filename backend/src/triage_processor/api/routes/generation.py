@@ -2,7 +2,7 @@ import json
 from typing import Any
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from triage_processor.api.dashboard_queries import (
     evidence_list_query,
@@ -10,6 +10,7 @@ from triage_processor.api.dashboard_queries import (
 )
 from triage_processor.api.generation_schemas import (
     GenerationJobCreate,
+    GenerationJobListResponse,
     GenerationJobResponse,
     TemplateCreate,
     TemplatePreviewRequest,
@@ -27,7 +28,9 @@ def _template_version(row: Any) -> TemplateVersionResponse:
     return TemplateVersionResponse(
         id=row["id"],
         version=row["version"],
+        html_source=row["html_source"],
         allowed_placeholders=list(row["allowed_placeholders"]),
+        used_by_article_count=int(row["used_by_article_count"]),
         created_by=row["created_by"],
         created_at=row["created_at"],
     )
@@ -48,9 +51,16 @@ async def _template_response(
         return None
     versions = await connection.fetch(
         """
-        SELECT id, version, allowed_placeholders, created_by, created_at
-        FROM article_template_versions
-        WHERE template_id = $1 ORDER BY version DESC
+        SELECT versions.id, versions.version, versions.html_source,
+               versions.allowed_placeholders, versions.created_by,
+               versions.created_at,
+               count(DISTINCT revisions.article_id) AS used_by_article_count
+        FROM article_template_versions AS versions
+        LEFT JOIN article_revisions AS revisions
+            ON revisions.template_version_id = versions.id
+        WHERE versions.template_id = $1
+        GROUP BY versions.id
+        ORDER BY versions.version DESC
         """,
         template_id,
     )
@@ -86,14 +96,20 @@ async def create_template(payload: TemplateCreate, request: Request) -> Template
         raise HTTPException(status_code=422, detail=str(error)) from error
     async with request.app.state.db_pool.acquire() as connection:
         async with connection.transaction():
-            template_id = await connection.fetchval(
-                """
-                INSERT INTO article_templates (name, description)
-                VALUES ($1, $2) RETURNING id
-                """,
-                payload.name,
-                payload.description,
-            )
+            try:
+                template_id = await connection.fetchval(
+                    """
+                    INSERT INTO article_templates (name, description)
+                    VALUES ($1, $2) RETURNING id
+                    """,
+                    payload.name,
+                    payload.description,
+                )
+            except asyncpg.UniqueViolationError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="a template with this name already exists",
+                ) from error
             await connection.execute(
                 """
                 INSERT INTO article_template_versions (
@@ -245,6 +261,47 @@ async def _load_job(connection: asyncpg.Connection, job_id: int) -> GenerationJo
         job_id,
     )
     return _job_response(row) if row is not None else None
+
+
+@router.get("/article-generation-jobs", response_model=GenerationJobListResponse)
+async def list_generation_jobs(
+    request: Request,
+    job_status: str | None = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+) -> GenerationJobListResponse:
+    if job_status not in {None, "pending", "processing", "completed", "failed", "dismissed"}:
+        raise HTTPException(status_code=422, detail="invalid generation job status")
+    offset = (page - 1) * page_size
+    if offset > 100_000:
+        raise HTTPException(status_code=422, detail="page offset is too large")
+    predicate = "$1::text IS NULL OR status = $1"
+    async with request.app.state.db_pool.acquire() as connection:
+        total = await connection.fetchval(
+            f"SELECT count(*) FROM article_generation_jobs WHERE {predicate}",
+            job_status,
+        )
+        rows = await connection.fetch(
+            f"""
+            SELECT id, status, strategy, taxonomy_type, taxonomy_key,
+                   taxonomy_name, template_version_id, editorial_guidance,
+                   attempts, available_at, last_error, resulting_article_id,
+                   status_url, created_at, updated_at
+            FROM article_generation_jobs
+            WHERE {predicate}
+            ORDER BY updated_at DESC, id DESC
+            OFFSET $2 LIMIT $3
+            """,
+            job_status,
+            offset,
+            page_size,
+        )
+    return GenerationJobListResponse(
+        items=[_job_response(row) for row in rows],
+        total=int(total or 0),
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.post(

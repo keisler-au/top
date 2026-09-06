@@ -37,9 +37,19 @@ routes remain refreshable and deep-linkable.
 - `src/styles` contains mobile-first design tokens and global styles.
 - `scripts` contains the dependency-free build and static development server.
 
-The overview and Themes & Topics routes use the WP2 dashboard endpoints. They
-provide summary metrics, URL-backed coverage exploration, recommendations,
-editorial attention states, and paginated evidence provenance. The Forms route
-registers and manages Google Sheets poller sources. Article, template, and
-generation workspaces remain route placeholders for their respective work
-packages.
+The Overview route uses the WP2 dashboard endpoints for summary metrics,
+URL-backed coverage exploration, recommendations, editorial attention states,
+and paginated evidence provenance. Forms registers and manages Google Sheets
+poller sources. Generate provides the durable article-generation workflow, and
+Articles provides the filterable library plus revision-safe editorial review,
+provenance, preview, and approval workspace. Template administration is nested
+inside the generation workflow’s Template step. Legacy `/templates` URLs redirect
+with history replacement to `/generate`, discarding template-page query/hash
+state so users start with a validated generation request.
+
+## Manual browser verification
+
+Browser functionality is tested manually for now using the
+[NAV-WP4 checklist](../docs/manual-navigation-checklist.md). Playwright and axe
+automation are deferred in [future recommendations](../docs/future-recommendations.md).
+The existing `npm test` command continues to run the Node unit tests.

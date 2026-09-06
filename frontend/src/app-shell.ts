@@ -10,19 +10,26 @@ export class DashboardApp extends HTMLElement {
   #menuButton: HTMLButtonElement | null = null;
   #routeStatus: HTMLElement | null = null;
   #content: HTMLElement | null = null;
+  readonly #desktop = window.matchMedia("(min-width: 52rem)");
 
   connectedCallback(): void {
     this.#renderShell();
     this.#router.addEventListener("route-change", this.#handleRouteChange);
     this.#router.start();
     document.addEventListener("keydown", this.#handleKeydown);
+    this.#desktop.addEventListener("change", this.#handleViewportChange);
   }
 
   disconnectedCallback(): void {
     this.#router.removeEventListener("route-change", this.#handleRouteChange);
     this.#router.stop();
     document.removeEventListener("keydown", this.#handleKeydown);
+    this.#desktop.removeEventListener("change", this.#handleViewportChange);
   }
+
+  readonly #handleViewportChange = (): void => {
+    this.#setMenu(false);
+  };
 
   readonly #handleRouteChange = (event: Event): void => {
     const route = (event as CustomEvent<RouteMatch>).detail;
@@ -31,8 +38,21 @@ export class DashboardApp extends HTMLElement {
 
   readonly #handleKeydown = (event: KeyboardEvent): void => {
     if (event.key === "Escape" && this.#menuOpen) {
+      event.preventDefault();
       this.#setMenu(false);
       this.#menuButton?.focus();
+    }
+    if (event.key === "Tab" && this.#menuOpen) {
+      const links = this.querySelectorAll<HTMLAnchorElement>(".sidebar a[href]");
+      const first = links[0];
+      const last = links[links.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
     }
   };
 
@@ -118,7 +138,11 @@ export class DashboardApp extends HTMLElement {
     backdrop.type = "button";
     backdrop.className = "navigation-backdrop";
     backdrop.setAttribute("aria-label", "Close navigation");
-    backdrop.addEventListener("click", () => this.#setMenu(false));
+    backdrop.tabIndex = -1;
+    backdrop.addEventListener("click", () => {
+      this.#setMenu(false);
+      this.#menuButton?.focus();
+    });
 
     const content = document.createElement("div");
     content.className = "app-content";
@@ -144,21 +168,40 @@ export class DashboardApp extends HTMLElement {
       return;
     }
     document.title = `${route.title} · Evidence dashboard`;
-    const page = route.name === "overview" || route.name === "taxonomy"
-      ? document.createElement("dashboard-overview")
-      : route.name === "forms"
-        ? document.createElement("forms-page")
-        : document.createElement("placeholder-page");
+    let page: HTMLElement;
+    if (route.name === "overview" || route.name === "taxonomy") {
+      page = document.createElement("dashboard-overview");
+    } else if (route.name === "articles") {
+      page = document.createElement("articles-page");
+    } else if (route.name === "article") {
+      page = document.createElement("article-detail-page");
+    } else if (route.name === "forms") {
+      page = document.createElement("forms-page");
+    } else if (route.name === "generate") {
+      page = document.createElement("generation-page");
+    } else {
+      page = document.createElement("placeholder-page");
+    }
     if (route.name === "taxonomy") {
       page.setAttribute("view", "taxonomy");
-    } else if (route.name !== "overview" && route.name !== "forms") {
+    } else if (
+      route.name !== "overview"
+      && route.name !== "articles"
+      && route.name !== "article"
+      && route.name !== "forms"
+      && route.name !== "generate"
+    ) {
       page.setAttribute("route", route.name);
+    }
+    if (route.name === "article") {
+      page.setAttribute("article-id", route.parameters.id ?? "");
     }
     this.#outlet.replaceChildren(page);
     for (const link of this.#navigation?.querySelectorAll("a") ?? []) {
       const active = link.dataset.routeName === route.name
         || (route.name === "article" && link.dataset.routeName === "articles");
-      link.toggleAttribute("aria-current", active);
+      if (active) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
     }
     if (this.#routeStatus) {
       this.#routeStatus.textContent = `${route.title} page loaded`;
@@ -175,9 +218,12 @@ export class DashboardApp extends HTMLElement {
       open ? "Close navigation" : "Open navigation",
     );
     this.#content?.toggleAttribute("inert", open);
+    this.querySelector(".mobile-header")?.toggleAttribute("inert", open);
     if (open) {
       requestAnimationFrame(() => {
-        this.#navigation?.querySelector<HTMLAnchorElement>("a")?.focus();
+        if (this.#menuOpen) {
+          this.#navigation?.querySelector<HTMLAnchorElement>("a")?.focus();
+        }
       });
     }
   }

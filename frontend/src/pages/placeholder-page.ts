@@ -27,11 +27,6 @@ const pageCopy: Record<RouteName, PageCopy> = {
     title: "Article",
     description: "The article review workspace will be introduced in a later package.",
   },
-  templates: {
-    eyebrow: "Publishing",
-    title: "Templates",
-    description: "Create and manage safe HTML article templates.",
-  },
   forms: {
     eyebrow: "Sources",
     title: "Forms",

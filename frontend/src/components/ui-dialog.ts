@@ -4,6 +4,7 @@ export class UiDialog extends HTMLElement {
   readonly #title: HTMLHeadingElement;
   readonly #body: HTMLDivElement;
   #initialized = false;
+  #returnFocus: HTMLElement | null = null;
 
   constructor() {
     super();
@@ -40,6 +41,10 @@ export class UiDialog extends HTMLElement {
         this.close();
       }
     });
+    this.#dialog.addEventListener("close", () => {
+      if (this.#returnFocus?.isConnected) this.#returnFocus.focus();
+      this.#returnFocus = null;
+    });
     this.append(this.#dialog);
   }
 
@@ -51,6 +56,9 @@ export class UiDialog extends HTMLElement {
 
   showModal(): void {
     if (!this.#dialog.open) {
+      this.#returnFocus = document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
       this.#dialog.showModal();
     }
   }
