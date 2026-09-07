@@ -104,3 +104,29 @@ export function generationPollDelay(
 export function generationJobIsActive(status: GenerationJobStatus): boolean {
   return status === "pending" || status === "processing";
 }
+
+export interface ActiveGenerationMessage {
+  title: string;
+  description: string;
+  loadingLabel: string;
+}
+
+export function activeGenerationMessage(
+  status: GenerationJobStatus,
+): ActiveGenerationMessage | null {
+  if (status === "pending") {
+    return {
+      title: "Article creation is queued",
+      description: "Your request has been saved. The generation worker will start creating a reviewable draft shortly.",
+      loadingLabel: "Waiting for the article generation worker…",
+    };
+  }
+  if (status === "processing") {
+    return {
+      title: "Article creation is in progress",
+      description: "The generation worker is writing and validating your reviewable draft. This can take a minute or two.",
+      loadingLabel: "Creating and validating the article draft…",
+    };
+  }
+  return null;
+}

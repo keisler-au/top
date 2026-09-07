@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  activeGenerationMessage,
   generationJobIsActive,
   generationPollDelay,
   generationSearch,
@@ -65,4 +66,19 @@ test("only non-terminal jobs continue polling", () => {
   assert.equal(generationJobIsActive("completed"), false);
   assert.equal(generationJobIsActive("failed"), false);
   assert.equal(generationJobIsActive("dismissed"), false);
+});
+
+test("active jobs have explicit article-creation copy", () => {
+  assert.deepEqual(activeGenerationMessage("pending"), {
+    title: "Article creation is queued",
+    description: "Your request has been saved. The generation worker will start creating a reviewable draft shortly.",
+    loadingLabel: "Waiting for the article generation worker…",
+  });
+  assert.deepEqual(activeGenerationMessage("processing"), {
+    title: "Article creation is in progress",
+    description: "The generation worker is writing and validating your reviewable draft. This can take a minute or two.",
+    loadingLabel: "Creating and validating the article draft…",
+  });
+  assert.equal(activeGenerationMessage("completed"), null);
+  assert.equal(activeGenerationMessage("failed"), null);
 });

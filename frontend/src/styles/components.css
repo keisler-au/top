@@ -476,6 +476,35 @@
   justify-self: start;
 }
 
+.generation-processing {
+  background: var(--color-primary-soft);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.generation-processing h3,
+.generation-processing p {
+  margin: 0;
+}
+
+.generation-processing h3 {
+  color: var(--color-primary-strong);
+  font-size: var(--font-size-lg);
+}
+
+.generation-processing > ui-loading {
+  color: var(--color-primary-strong);
+  font-weight: 750;
+}
+
+.generation-processing-note {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
 @media (min-width: 48rem) {
   .template-selection-layout {
     align-items: start;

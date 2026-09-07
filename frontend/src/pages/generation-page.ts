@@ -13,6 +13,7 @@ import { api } from "../app-context.js";
 import type { UiDialog } from "../components/ui-dialog.js";
 import { formatInteger } from "../utils/format.js";
 import {
+  activeGenerationMessage,
   generationJobIsActive,
   generationPollDelay,
   generationSearch,
@@ -1121,7 +1122,7 @@ export class GenerationPage extends HTMLElement {
       this.#pollCount = 0;
       this.#finishRequest();
       this.#replaceUrl();
-      this.#announce("Article generation queued.");
+      this.#announce(`Article creation queued as job ${job.id}.`);
       this.#schedulePoll();
     } catch (error) {
       if (!this.#controller?.signal.aborted) this.#failRequest(error);
@@ -1213,6 +1214,24 @@ export class GenerationPage extends HTMLElement {
     status.setAttribute("tone", this.#job.status === "failed" ? "danger"
       : this.#job.status === "completed" ? "positive" : "neutral");
     status.textContent = this.#jobStatus(this.#job);
+    const activeMessage = activeGenerationMessage(this.#job.status);
+    if (activeMessage) {
+      const processing = document.createElement("section");
+      processing.className = "generation-processing";
+      processing.setAttribute("aria-labelledby", "generation-processing-heading");
+      const heading = document.createElement("h3");
+      heading.id = "generation-processing-heading";
+      heading.textContent = activeMessage.title;
+      const copy = document.createElement("p");
+      copy.textContent = activeMessage.description;
+      const loading = document.createElement("ui-loading");
+      loading.setAttribute("label", activeMessage.loadingLabel);
+      const continuation = document.createElement("p");
+      continuation.className = "generation-processing-note";
+      continuation.textContent = "This page checks automatically. You can leave or refresh safely; the job will continue in the background.";
+      processing.append(heading, copy, loading, continuation);
+      wrapper.append(processing);
+    }
     const facts = document.createElement("dl");
     facts.className = "generation-summary";
     this.#summaryFact(facts, "Target", this.#job.taxonomy_name);
