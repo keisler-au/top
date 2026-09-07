@@ -178,7 +178,7 @@ system's low-throughput workload.
 See [Database inspection queries](docs/database-inspection.md) for question,
 submission, suggestion-materialization, and answer-to-theme SQL examples.
 
-## Run the full stack with Docker Compose
+## Run the production stack with Docker Compose
 
 The Compose stack includes PostgreSQL, Ollama, the FastAPI API, and all four
 workers. Start the full stack with:
@@ -186,6 +186,12 @@ workers. Start the full stack with:
 ```bash
 docker compose up --build
 ```
+
+The dashboard is available at `http://localhost:8080` by default. It is the
+only user-facing port: it serves the single-page app, preserves deep links, and
+proxies `/api/*` requests to FastAPI. PostgreSQL, Ollama, and the API remain on
+the internal Compose network. Set `DASHBOARD_PORT` to choose a different host
+port.
 
 On first startup, the `ollama-init` service downloads the default
 `qwen3:4b-instruct` chat model and `nomic-embed-text` embedding model before the workers
@@ -201,16 +207,62 @@ migrations in one startup. Each migration and its tracking row commit in the
 same transaction. Add new migrations as numbered `.sql` files; no Compose
 change is needed.
 
-The API is available at `http://localhost:8000`, PostgreSQL at
-`localhost:5432`, and Ollama at `http://localhost:11434`. Stop the stack with
-`docker compose down`; the PostgreSQL data and downloaded Ollama models remain
-in their named volumes.
+Stop the stack with `docker compose down`; the PostgreSQL data and downloaded
+Ollama models remain in their named volumes. Add `-v` only when intentionally
+discarding all local database data and downloaded models.
 
 Compose environment variables can override the defaults, for example:
 
 ```bash
-API_PORT=8080 LLM_MODEL=qwen3:4b-instruct docker compose up --build
+DASHBOARD_PORT=8081 LLM_MODEL=qwen3:4b-instruct docker compose up --build
 ```
+
+The main runtime settings are `POSTGRES_DB`, `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, `LLM_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `LLM_API_KEY`, and
+the worker queue settings documented below. Keep secrets in `.env` (which is
+ignored by Git) or your deployment secret store; never put credentials in the
+Compose file. `LLM_API_KEY` is only needed for a compatible external model
+endpoint.
+
+For local frontend development, run `npm ci && npm run dev` in `frontend/` and
+run the API separately on port 8000. The development server proxies `/api` to
+that local API; production traffic always goes through the `frontend` service.
+
+### Backup and restore
+
+Back up the PostgreSQL database before upgrading images or applying operational
+changes:
+
+```bash
+docker compose exec -T postgres pg_dump -U postgres -d triage -Fc > triage.backup
+```
+
+Restore into a stopped application stack after confirming the target database:
+
+```bash
+docker compose up -d postgres
+docker compose exec -T postgres dropdb -U postgres --if-exists triage
+docker compose exec -T postgres createdb -U postgres triage
+docker compose exec -T postgres pg_restore -U postgres -d triage --clean --if-exists < triage.backup
+docker compose up -d
+```
+
+The Google Sheets importer is optional and starts only with the
+`google-sheets` profile. Mount a service-account JSON file through
+`GOOGLE_SHEETS_CREDENTIALS_FILE`, then run:
+
+```bash
+docker compose --profile google-sheets up --build
+```
+
+### Operations summary and logs
+
+`GET /api/operations/summary` reports bounded counters and ages for the
+evidence queue, topic validation, theme refresh, article generation, form
+polling, and recent approvals. It deliberately returns no source responses,
+generated articles, errors, prompts, credentials, or model headers. API,
+worker, and importer logs are JSON records containing event metadata, request
+path, status, duration, and safe exception type only.
 
 ## Worker queue
 

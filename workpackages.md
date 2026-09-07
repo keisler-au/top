@@ -2,7 +2,7 @@
 
 **Status: implemented.** This is the historical question-context pipeline plan.
 Its WP8 is form/question/submission retrieval and is unrelated to Dashboard WP8
-in `docs/dashboard-remaining-work-packages.md`.
+in `docs/dashboard-article-work-packages-archive.md`.
 
 This revision retains v2's question-context design and tightens the WP6/WP7
 theme flow: topic aggregation now uses complete, stable membership;

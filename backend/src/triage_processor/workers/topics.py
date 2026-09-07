@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 
 from triage_processor.clients.llm import StructuredChatClient
 from triage_processor.config import DATABASE_URL
+from triage_processor.observability import configure_logging
 from triage_processor.job_queue import QueueSettings, run_job_loop
 from triage_processor.workers.low_information import is_low_information
 
@@ -1171,10 +1172,7 @@ def main() -> None:
     if args.validation_attempts < 1:
         parser.error("--validation-attempts must be at least 1")
 
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging()
     asyncio.run(
         run_worker(
             once=args.once,

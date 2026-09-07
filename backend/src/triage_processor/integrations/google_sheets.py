@@ -13,6 +13,7 @@ from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account
 
 from triage_processor.config import DATABASE_URL
+from triage_processor.observability import configure_logging
 
 LOGGER = logging.getLogger(__name__)
 SHEETS_READONLY_SCOPE = (
@@ -434,10 +435,7 @@ def main() -> None:
     if args.poll_interval <= 0 or args.batch_size < 1:
         parser.error("poll interval and batch size must be positive")
 
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging()
     asyncio.run(
         run_poller(
             once=args.once,

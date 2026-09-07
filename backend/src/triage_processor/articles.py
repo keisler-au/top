@@ -87,7 +87,10 @@ async def resolve_evidence(
             row = await connection.fetchrow(
                 """
                 SELECT
-                    segments.original_input_id,
+                    -- article_evidence stores one canonical target.  The parent
+                    -- input is recovered through segment_inputs for provenance,
+                    -- rather than duplicated here.
+                    NULL::bigint AS original_input_id,
                     segments.id AS segment_input_id,
                     segments.segment_text AS text,
                     lower(btrim(segments.topic)) AS topic_key,

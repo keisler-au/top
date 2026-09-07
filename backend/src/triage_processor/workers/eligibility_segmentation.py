@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from triage_processor.clients.llm import StructuredChatClient
 from triage_processor.config import DATABASE_URL
+from triage_processor.observability import configure_logging
 from triage_processor.job_queue import QueueSettings, run_job_loop
 
 LOGGER = logging.getLogger(__name__)
@@ -328,10 +329,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging()
     asyncio.run(run_worker(once=args.once, poll_interval=args.poll_interval))
 
 

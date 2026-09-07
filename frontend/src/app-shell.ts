@@ -119,7 +119,6 @@ export class DashboardApp extends HTMLElement {
       const label = document.createElement("span");
       label.textContent = item.label;
       link.append(icon, label);
-      link.addEventListener("click", () => this.#setMenu(false));
       listItem.append(link);
       list.append(listItem);
     }
@@ -131,7 +130,6 @@ export class DashboardApp extends HTMLElement {
     createLink.dataset.route = "";
     createLink.className = "create-link";
     createLink.textContent = "Generate article";
-    createLink.addEventListener("click", () => this.#setMenu(false));
     sidebar.append(brand, nav, createLink);
 
     const backdrop = document.createElement("button");
@@ -167,6 +165,10 @@ export class DashboardApp extends HTMLElement {
     if (!this.#outlet) {
       return;
     }
+    // A route chosen from the mobile drawer must not leave focus on an element
+    // that has just become inert or hidden.  Preserve normal desktop link
+    // behavior while moving drawer users to the freshly rendered main landmark.
+    const moveFocusToContent = this.#menuOpen;
     document.title = `${route.title} · Evidence dashboard`;
     let page: HTMLElement;
     if (route.name === "overview" || route.name === "taxonomy") {
@@ -207,6 +209,9 @@ export class DashboardApp extends HTMLElement {
       this.#routeStatus.textContent = `${route.title} page loaded`;
     }
     this.#setMenu(false);
+    if (moveFocusToContent) {
+      requestAnimationFrame(() => this.#outlet?.focus());
+    }
   }
 
   #setMenu(open: boolean): void {

@@ -1,17 +1,21 @@
-# Remaining dashboard and article work packages
+# Archived dashboard and article work packages
+
+> Archived on 2026-09-07. This document records the completed dashboard,
+> article, navigation, and operations plan. It is retained for implementation
+> history and regression context; the proposed batch-taxonomy work is planned
+> in [`taxonomy-rebuild-work-packages.md`](taxonomy-rebuild-work-packages.md).
 
 > **Numbering note:** WP numbers in this dashboard/article plan are independent
 > of the older question-context plan in `../workpackages.md`. “WP8” here means
 > the article-generation frontend workflow.
 
-This document is the implementation handoff for work that remains after WP1
-through WP10. It preserves the original work-package numbering so future
-changes can refer to a stable plan.
+This document records implementation and verification status for the
+dashboard/article work. It preserves the original work-package numbering so
+future changes can refer to a stable plan.
 
 ## Completed baseline
 
-The following implementation work is complete; consolidated browser,
-accessibility, database-integration, and security verification remains WP11:
+The following implementation work is present in the repository:
 
 - **WP1:** dashboard product and data contract in
   [`dashboard-product-contract.md`](dashboard-product-contract.md).
@@ -27,18 +31,27 @@ accessibility, database-integration, and security verification remains WP11:
 - **WP9:** article library and revision-safe editorial review workspace.
 - **WP10:** in-workflow template management plus form registration, editing,
   health display, and polling controls.
+- **NAV-WP1 through NAV-WP4:** consolidated navigation, compatibility
+  redirects, persistent sidebar action, route announcements, and mobile-drawer
+  focus restoration.
+- **WP12:** production frontend image/configuration, Compose wiring, health
+  checks, content-safe JSON logs, and the operations-summary API.
 
 The dashboard now reads article and generation metrics from their durable
 tables, and the generation and editorial workflows expose the durable article
-lifecycle. The remaining packages consolidate navigation, complete verification,
-and add production packaging.
+lifecycle. The repository does not yet contain real-browser or automated
+accessibility coverage, the broader WP11 security corpus, or a recorded
+container/CI verification run.
 
-The remaining recommended order is:
+The remaining verification order is:
 
 ```text
-NAV-WP4
+manual NAV-WP4 checklist
+         │
+         └──→ WP11 browser/accessibility and security verification
+              (Playwright/axe automation is deferred)
 
-WP11 ──→ WP12
+container/CI smoke verification for WP12
 ```
 
 Pipeline-visibility packages present in an earlier revision of this document
@@ -47,8 +60,10 @@ must not be inferred as completed work.
 
 ## Approved navigation consolidation work packages
 
-**Status: partially completed.** NAV-WP1 through NAV-WP3 are implemented;
-NAV-WP4 remains planned.
+**Status: implementation completed; manual verification pending.** NAV-WP1
+through NAV-WP3 are complete. NAV-WP4's router regressions, shell semantics,
+and mobile-drawer focus restoration are implemented; its live-browser checklist
+has not been executed.
 
 ### Original planning assessment (resolved by NAV-WP1 through NAV-WP3)
 
@@ -221,9 +236,11 @@ route does.
 
 ### NAV-WP4 — Navigation regression and accessibility verification
 
-**Status: awaiting manual verification.** Router regressions and shell
-accessibility fixes are implemented. Browser functionality will be tested
-manually for now, per the 2026-09-05 decision. Use the
+**Status: implementation completed; awaiting manual verification.** Router
+regressions and shell accessibility fixes are implemented, including focus
+return from mobile-drawer route selection to the newly rendered main landmark.
+Browser functionality will be tested manually for now, per the 2026-09-05
+decision. Use the
 [manual navigation checklist](manual-navigation-checklist.md); no browser pass
 is claimed. Playwright/axe automation is deferred to
 [future recommendations](future-recommendations.md).
@@ -865,9 +882,13 @@ on the server.
 
 ## WP11 — Integration, database, browser, accessibility, and security testing
 
-**Status: planned.** Unit suites exist, but the consolidated PostgreSQL,
-real-browser, accessibility, and security coverage described below has not been
-implemented.
+**Status: partially completed.** The opt-in isolated PostgreSQL suite and its
+Compose test stack exercise the durable schema, canonical counts, lifecycle
+transitions, provenance, constraints, deterministic pagination, and bounded
+operations output. Existing unit security tests cover template validation and
+HTML sanitization. Real-browser/manual accessibility verification, automated
+accessibility scans, and the broader security corpus remain incomplete;
+Playwright/axe automation is deferred.
 
 ### Objective
 
@@ -876,12 +897,16 @@ unit-heavy implementation.
 
 ### Current gaps to close
 
-- Dashboard SQL is tested with API fakes and query-contract assertions, but it
-  needs execution against a real PostgreSQL schema with representative data.
+- The real-PostgreSQL suite is implemented in
+  `backend/tests/integration/test_dashboard_postgres.py` and can be run through
+  `compose.test.yaml`; a container-capable CI or local execution record is still
+  needed.
 - Frontend tests cover pure TypeScript modules, but Web Components and user
   flows need real DOM/browser tests.
 - There is no automated accessibility scan.
-- There is no article/template security corpus yet.
+- Template validation and rendered-HTML sanitization have unit coverage, but
+  there is no complete stored/reflected XSS and preview-breakout corpus across
+  every user-controlled field.
 
 ### Database integration tests
 
@@ -948,9 +973,15 @@ refresh.
 
 ## WP12 — Production packaging, deployment, and operations
 
-**Status: planned.** The repository still uses the development frontend server;
-the production image, health checks, deployment documentation, and operational
-hardening described below remain outstanding.
+**Status: implementation completed; container smoke verification pending.** The
+multi-stage frontend image serves the built dashboard behind one public port,
+proxies API requests internally, supplies conservative caching, compression,
+headers, body limits, and health checks. Compose and root documentation cover
+the runtime, model initialization, optional Google Sheets profile, environment
+configuration, backup/restore, and a bounded operations summary. API, worker,
+and importer logs use content-safe JSON records. The repository has no recorded
+full container smoke run or CI workflow, and authentication remains a release
+gate for any deployment beyond this trusted environment.
 
 ### Objective
 
@@ -1012,6 +1043,10 @@ Add structured logging and operational views for:
 
 Never log complete source responses, generated article bodies, service-account
 credentials, or LLM authorization headers by default.
+
+Implemented through `GET /operations/summary` and JSON logs. The endpoint
+returns aggregate queue counts/ages and operational counters only; it never
+returns job payloads, error text, prompts, source content, or credentials.
 
 ### Authentication decision gate
 

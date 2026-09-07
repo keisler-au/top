@@ -7,7 +7,7 @@ import asyncpg
 from fastapi import FastAPI
 import httpx
 
-from triage_processor.api.routes import articles, dashboard, generation, form_sources
+from triage_processor.api.routes import articles, dashboard, generation, form_sources, operations
 from triage_processor.articles import canonical_theme_ids
 from triage_processor.workers.article_generation import claim_job, process_job
 
@@ -43,7 +43,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         )
         self.addAsyncCleanup(self.pool.close)
         app = FastAPI()
-        for router in (articles.router, dashboard.router, generation.router, form_sources.router):
+        for router in (articles.router, dashboard.router, generation.router, form_sources.router, operations.router):
             app.include_router(router)
         app.state.db_pool = self.pool
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
@@ -109,6 +109,31 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, 'invalid theme'):
             await canonical_theme_ids(self.admin, [6])
         self.assertEqual((await self.client.get('/taxonomy/theme/6')).status_code, 404)
+
+    async def test_operations_summary_is_bounded_and_content_safe(self):
+        await self.admin.execute("""
+            UPDATE worker_jobs
+            SET status = 'failed', locked_at = NULL, locked_by = NULL,
+                last_error = 'must never be exposed', updated_at = CURRENT_TIMESTAMP
+            WHERE job_type = 'eligibility_segmentation';
+            INSERT INTO form_sources (source, form_id, spreadsheet_id, last_error)
+            VALUES ('google-sheets', 'ops', 'ops-sheet', 'credential-like failure');
+            INSERT INTO article_generation_jobs (
+                status, strategy, taxonomy_type, taxonomy_key, taxonomy_name,
+                template_version_id, status_url, last_error
+            ) VALUES (
+                'failed', 'specific', 'topic', 'cost', 'Cost', 1, '/article-generation-jobs/1', 'raw model output'
+            );
+        """)
+        payload = await self.get('/operations/summary')
+        self.assertEqual(payload['article_generation']['failed'], 1)
+        self.assertEqual(payload['enabled_form_sources'], 1)
+        self.assertEqual(payload['form_poll_failures'], 1)
+        stages = {item['stage']: item for item in payload['evidence_pipeline']}
+        self.assertEqual(stages['eligibility_segmentation']['failed'], 1)
+        self.assertNotIn('last_error', str(payload))
+        self.assertNotIn('must never be exposed', str(payload))
+        self.assertNotIn('credential-like failure', str(payload))
 
     async def test_article_lifecycle_changes_coverage_and_recommendations(self):
         approved = await self.create_article(themes=[4, 2])

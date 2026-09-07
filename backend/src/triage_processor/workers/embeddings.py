@@ -12,6 +12,7 @@ from triage_processor.clients.ollama import (
     validate_vector,
 )
 from triage_processor.config import DATABASE_URL
+from triage_processor.observability import configure_logging
 from triage_processor.job_queue import QueueSettings, run_job_loop
 
 LOGGER = logging.getLogger(__name__)
@@ -270,10 +271,7 @@ def main() -> None:
     if args.batch_size < 1:
         parser.error("--batch-size must be at least 1")
 
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging()
     asyncio.run(
         run_worker(
             once=args.once,

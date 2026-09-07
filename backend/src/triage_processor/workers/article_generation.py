@@ -14,6 +14,7 @@ from triage_processor.api.generation_schemas import GeneratedArticle
 from triage_processor.articles import ResolvedEvidence, create_article_record, normalize_topic
 from triage_processor.clients.llm import StructuredChatClient
 from triage_processor.config import DATABASE_URL
+from triage_processor.observability import configure_logging
 from triage_processor.templates import render_template
 
 LOGGER = logging.getLogger(__name__)
@@ -350,10 +351,7 @@ def main() -> None:
         default=float(os.getenv("GENERATION_WORKER_POLL_INTERVAL", "2")),
     )
     args = parser.parse_args()
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO"),
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    configure_logging()
     asyncio.run(run_worker(once=args.once, poll_interval=args.poll_interval))
 
 

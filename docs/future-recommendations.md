@@ -30,4 +30,4 @@ also complement, rather than replace, manual screen-reader review.
 Current verification instructions are in
 [the manual navigation checklist](manual-navigation-checklist.md). The broader
 integration and security work remains in
-[WP11](dashboard-remaining-work-packages.md#wp11--integration-database-browser-accessibility-and-security-testing).
+[the archived dashboard/article plan](dashboard-article-work-packages-archive.md#wp11--integration-database-browser-accessibility-and-security-testing).
