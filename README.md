@@ -1,11 +1,13 @@
-This system stores original comments, embeds them for similarity search, and
-asks a local LLM to suggest topics and themes.
+This system stores original comments, prepares embeddings, and builds an
+immutable, run-scoped taxonomy with a local LLM.
 
 # Project Context
 
 ## Objective
 
-Build a local system that captures user inputs, identifies distinct points within them, creates semantic embeddings, assigns topics, and identifies recurring themes across multiple inputs.
+Build a local system that captures user inputs, identifies distinct points
+within them, creates semantic embeddings, and publishes one reviewed batch
+taxonomy across multiple inputs.
 
 The original input remains the source of truth. LLM outputs are stored as system-generated classifications and suggestions.
 
@@ -23,10 +25,8 @@ Input received
 → saved unchanged in PostgreSQL
 → eligibility and segmentation
 → full-input and segment embeddings
-→ similarity search
-→ topic assignment
-→ topic-level theme inference
-→ theme materialization
+→ immutable batch snapshot
+→ leased taxonomy stages and one published run
 → evidence-grounded article generation
 → explicit editorial approval
 ```
@@ -53,27 +53,11 @@ Processes eligible inputs.
 
 The embedding model does not access the database directly.
 
-### Worker 3: topic assignment
+### Taxonomy scheduler and article generation
 
-Processes embedded inputs.
-
-* Find similar evidence using pgvector: segments from split answers and the
-  complete originals of answers that did not need segmentation.
-* Retrieve relevant existing topics.
-* Ask the LLM to reuse an existing topic or suggest a new one.
-* Save topic assignments and mark the input complete.
-
-### Worker 4: theme management
-
-Runs from queued completion events across completed inputs.
-
-* Aggregate complete, case-insensitive membership for each topic.
-* Retrieve relevant existing themes.
-* Ask the LLM to reuse, update, merge or create themes.
-* Link themes to relevant topics and supporting inputs.
-* Materialize suggestions into live themes and topic links.
-
-### Worker 5: article generation
+The taxonomy scheduler processes frozen run stages (clustering, topic naming,
+theme inference, reconciliation, and quality) under durable leases; it never
+uses per-input topic/theme jobs. The article-generation worker:
 
 Processes durable generation jobs independently of the evidence pipeline.
 
@@ -92,18 +76,13 @@ Topic = what an input or segment is about
 Theme = what multiple related inputs are collectively saying
 ```
 
-Topics and themes are stored separately but linked because their relationship may be many-to-many.
-
 Question context is normalized in the immutable `questions` table. The
 identity `(source, form_key, question_key, question_version)` preserves the
 exact question wording used to interpret an answer. Contextual answers embed
 the question and answer together; generic inputs retain answer-only behavior.
 
-Topics are fine-grained and question-aware. Themes are global abstractions
-over complete topic membership, not clusters of raw answer embeddings.
-Suggestion rows preserve the model's audit trail, while `themes` and
-`theme_topics` represent live state. Merged themes remain as alias rows whose
-`merged_into_id` points directly to a canonical live theme.
+Topics and themes are run-scoped revisions with durable stable identities.
+The sole published run is the source for all taxonomy readers and generation.
 
 ## Design principles
 
@@ -111,11 +90,11 @@ Suggestion rows preserve the model's audit trail, while `themes` and
 * Preserve original text.
 * Store segments separately from inputs.
 * Store full-input and segment embeddings in PostgreSQL.
-* Use statuses to control processing stages.
+* Use statuses only to control evidence preparation; taxonomy work is run-scoped.
 * Avoid tightly coupling workers.
 * Start with sequential or scheduled workers.
 * Use the PostgreSQL-backed queue for durable retries and worker scaling.
-* Prefer existing topics and themes before creating new ones.
+* Preserve batch taxonomy identity and lineage across published runs.
 
 ## Repository layout
 
@@ -136,14 +115,8 @@ Suggestion rows preserve the model's audit trail, while `themes` and
 └── compose.yaml
 ```
 
-See
-[Architecture](docs/architecture.md) for the backend responsibility boundaries
-and [Worker queue](docs/worker-queue.md) for queue operations. The optional
-[Google Sheets importer](docs/google-sheets.md) polls registered Google Form
-response sheets without requiring a public webhook.
-
-Article lifecycle, templates, and generation endpoints are documented in
-[Article and generation API](docs/article-generation-api.md).
+See the [documentation guide](docs/README.md) for architecture, API,
+operations, and the active batch-taxonomy production plan.
 
 ## Backend development
 
@@ -167,31 +140,35 @@ uv run uvicorn triage_processor.api.main:app --reload
 `GET /inputs` supports form, question, and submission retrieval. Question and
 submission filters are scoped by both `source` and `form_key`; omitting
 `question_version` returns every version of the selected question. Results
-include resolved question context and all canonical themes linked through the
-answer's original or segment topics.
+include resolved question context and a taxonomy projection from exactly one
+published run. `topics` and `themes` contain stable IDs plus display snapshots;
+the retired string `topic` field is never returned. `taxonomy_state` is
+`classified`, `pending_classification` for evidence after the published cutoff,
+or `taxonomy_unavailable` before the first publication.
 
 The endpoint uses deterministic `id` ordering with `offset`/`limit`
 pagination. The default limit is 50, the maximum limit is 100, and offset is
 bounded at 100,000. This deliberately simple pagination model matches the
 system's low-throughput workload.
 
-See [Database inspection queries](docs/database-inspection.md) for question,
-submission, suggestion-materialization, and answer-to-theme SQL examples.
+See [Operations](docs/operations.md) for bounded diagnostic queries and queue
+recovery guidance.
 
 ## Run the production stack with Docker Compose
 
-The Compose stack includes PostgreSQL, Ollama, the FastAPI API, and all four
-workers. Start the full stack with:
+The Compose stack includes PostgreSQL, Ollama, the FastAPI API, two
+evidence-preparation workers, the taxonomy scheduler, and article generation.
+Start the full stack with:
 
 ```bash
 docker compose up --build
 ```
 
-The dashboard is available at `http://localhost:8080` by default. It is the
-only user-facing port: it serves the single-page app, preserves deep links, and
-proxies `/api/*` requests to FastAPI. PostgreSQL, Ollama, and the API remain on
-the internal Compose network. Set `DASHBOARD_PORT` to choose a different host
-port.
+The administrative dashboard is an opt-in local-only profile. Start it with
+`docker compose --profile admin up --build`; it is available at
+`http://127.0.0.1:8081` by default and proxies its internal `/api/*` requests
+to FastAPI. PostgreSQL, Ollama, and the API remain on the internal Compose
+network. Set `ADMIN_PORT` to choose a different loopback port.
 
 On first startup, the `ollama-init` service downloads the default
 `qwen3:4b-instruct` chat model and `nomic-embed-text` embedding model before the workers
@@ -224,9 +201,15 @@ ignored by Git) or your deployment secret store; never put credentials in the
 Compose file. `LLM_API_KEY` is only needed for a compatible external model
 endpoint.
 
-For local frontend development, run `npm ci && npm run dev` in `frontend/` and
+Legacy taxonomy history is retained in the immutable
+`taxonomy_legacy_archive` schema from migration `034`. It is included in the
+normal PostgreSQL backup/restore procedure; use the protected archive audit
+API and its checksum manifest for inspection rather than querying it from
+taxonomy readers.
+
+For local dashboard development, run `npm ci && npm run dev` in `frontend/admin/` and
 run the API separately on port 8000. The development server proxies `/api` to
-that local API; production traffic always goes through the `frontend` service.
+that local API; Compose dashboard traffic goes through the `admin-web` service.
 
 ### Backup and restore
 
@@ -258,11 +241,11 @@ docker compose --profile google-sheets up --build
 ### Operations summary and logs
 
 `GET /api/operations/summary` reports bounded counters and ages for the
-evidence queue, topic validation, theme refresh, article generation, form
-polling, and recent approvals. It deliberately returns no source responses,
-generated articles, errors, prompts, credentials, or model headers. API,
-worker, and importer logs are JSON records containing event metadata, request
-path, status, duration, and safe exception type only.
+evidence queue, batch taxonomy runs, article generation, form polling, and
+recent approvals. It deliberately returns no source responses, generated
+articles, errors, prompts, credentials, or model headers. API, worker, and
+importer logs are JSON records containing event metadata, request path, status,
+duration, and safe exception type only.
 
 ## Worker queue
 
@@ -277,9 +260,10 @@ status:
 ```text
 new → eligibility_segmentation
 ready_for_embedding → embeddings
-ready_for_analysis → topics
-completed → themes
 ```
+
+`ready_for_analysis` means that evidence is available for a future immutable
+batch snapshot; it does not enqueue a retired incremental taxonomy worker.
 
 Workers claim jobs with `FOR UPDATE SKIP LOCKED`, so a service can be scaled
 without two instances claiming the same available job. Claims have renewable
@@ -330,26 +314,3 @@ Individual worker services can be scaled independently, for example:
 ```bash
 docker compose up --build --scale embeddings=2
 ```
-
-## Interactive manual testing
-
-With the Compose stack running, use the interactive runner to submit sample
-inputs and inspect their stored pipeline results:
-
-```bash
-python3 infrastructure/postgres/manual_test.py
-```
-
-Each invocation creates a unique source tag. To inspect a previous run, copy
-the source shown in its menu and pass it explicitly:
-
-```bash
-python3 infrastructure/postgres/manual_test.py \
-  --source manual-20260726-143000
-```
-
-The runner includes generic inputs and contextual fixtures for short and long
-answers, identical text under different questions, related answers, and
-multi-answer submissions. Its inspection menu shows pending/materialized
-suggestions and the full form → question → submission → answer → topic →
-canonical themes chain.

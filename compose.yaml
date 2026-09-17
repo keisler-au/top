@@ -68,6 +68,11 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
+      TAXONOMY_PUBLICATION_ENABLED: ${TAXONOMY_PUBLICATION_ENABLED:-false}
+      TAXONOMY_MUTATION_TOKEN: ${TAXONOMY_MUTATION_TOKEN:-}
+      TAXONOMY_REVIEW_TOKEN: ${TAXONOMY_REVIEW_TOKEN:-}
+      OPERATIONS_RATE_LIMIT_REQUESTS: ${OPERATIONS_RATE_LIMIT_REQUESTS:-30}
+      OPERATIONS_RATE_LIMIT_WINDOW_SECONDS: ${OPERATIONS_RATE_LIMIT_WINDOW_SECONDS:-60}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 5s
@@ -81,12 +86,13 @@ services:
       ollama:
         condition: service_healthy
 
-  frontend:
+  admin-web:
+    profiles: ["admin"]
     build:
-      context: ./frontend
+      context: ./frontend/admin
     restart: unless-stopped
     ports:
-      - "${DASHBOARD_PORT:-8080}:8080"
+      - "127.0.0.1:${ADMIN_PORT:-8081}:8080"
     depends_on:
       api:
         condition: service_healthy
@@ -175,60 +181,29 @@ services:
       ollama-init:
         condition: service_completed_successfully
 
-  topics:
+  taxonomy-scheduler:
     build:
       context: ./backend
-    command: ["python", "-m", "triage_processor.workers.topics"]
+    command: ["python", "-m", "triage_processor.taxonomy_scheduler"]
     restart: unless-stopped
+    stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD", "python", "-m", "triage_processor.taxonomy_scheduler", "--healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
       LLM_MODEL: ${LLM_MODEL:-qwen3:4b-instruct}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
-      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
-      TOPIC_SIMILAR_LIMIT: ${TOPIC_SIMILAR_LIMIT:-5}
-      TOPIC_EXISTING_LIMIT: ${TOPIC_EXISTING_LIMIT:-50}
-      TOPIC_VALIDATION_ATTEMPTS: ${TOPIC_VALIDATION_ATTEMPTS:-3}
-      TOPIC_LOW_INFO_MAX_CHARS: ${TOPIC_LOW_INFO_MAX_CHARS:-15}
-      TOPIC_LOW_INFO_CLOSED_FORM: ${TOPIC_LOW_INFO_CLOSED_FORM:-yes,no,n/a,na,none,maybe,unsure,idk}
-      QUEUE_LEASE_SECONDS: ${QUEUE_LEASE_SECONDS:-300}
-      QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-5}
-      QUEUE_RETRY_BASE_SECONDS: ${QUEUE_RETRY_BASE_SECONDS:-5}
-      QUEUE_RETRY_MAX_SECONDS: ${QUEUE_RETRY_MAX_SECONDS:-300}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-      ollama:
-        condition: service_healthy
-      ollama-init:
-        condition: service_completed_successfully
-
-  themes:
-    build:
-      context: ./backend
-    command: ["python", "-m", "triage_processor.workers.themes"]
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/triage}
-      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
-      LLM_MODEL: ${LLM_MODEL:-qwen3:4b-instruct}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
-      THEME_WORKER_INTERVAL: ${THEME_WORKER_INTERVAL:-2}
-      THEME_EXISTING_LIMIT: ${THEME_EXISTING_LIMIT:-50}
-      THEME_SAMPLE_EVIDENCE_LIMIT: ${THEME_SAMPLE_EVIDENCE_LIMIT:-5}
-      THEME_MIN_RICH_INPUTS: ${THEME_MIN_RICH_INPUTS:-${THEME_MIN_RICH_UNITS:-2}}
-      THEME_MIN_DISTINCT_QUESTIONS_LOW_INFO: ${THEME_MIN_DISTINCT_QUESTIONS_LOW_INFO:-3}
-      TOPIC_LOW_INFO_MAX_CHARS: ${TOPIC_LOW_INFO_MAX_CHARS:-15}
-      TOPIC_LOW_INFO_CLOSED_FORM: ${TOPIC_LOW_INFO_CLOSED_FORM:-yes,no,n/a,na,none,maybe,unsure,idk}
-      QUEUE_LEASE_SECONDS: ${QUEUE_LEASE_SECONDS:-300}
-      QUEUE_MAX_ATTEMPTS: ${QUEUE_MAX_ATTEMPTS:-5}
-      QUEUE_RETRY_BASE_SECONDS: ${QUEUE_RETRY_BASE_SECONDS:-5}
-      QUEUE_RETRY_MAX_SECONDS: ${QUEUE_RETRY_MAX_SECONDS:-300}
+      TAXONOMY_POLL_INTERVAL: ${TAXONOMY_POLL_INTERVAL:-10}
+      TAXONOMY_LEASE_SECONDS: ${TAXONOMY_LEASE_SECONDS:-900}
+      TAXONOMY_MAX_ATTEMPTS: ${TAXONOMY_MAX_ATTEMPTS:-3}
+      TAXONOMY_RETRY_BASE_SECONDS: ${TAXONOMY_RETRY_BASE_SECONDS:-5}
+      TAXONOMY_RETRY_MAX_SECONDS: ${TAXONOMY_RETRY_MAX_SECONDS:-300}
+      TAXONOMY_SCHEDULER_CONFIGURATION_VERSION: ${TAXONOMY_SCHEDULER_CONFIGURATION_VERSION:-taxonomy-scheduler-v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:

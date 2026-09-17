@@ -12,6 +12,15 @@ class QueueStageMetrics(BaseModel):
     oldest_ready_wait_seconds: int | None = None
 
 
+class TaxonomyRunMetrics(BaseModel):
+    active: int = 0
+    review_backlog: int = 0
+    snapshot_evidence_count: int = 0
+    noise_count: int = 0
+    validation_failures: int = 0
+    last_published_at: datetime | None = None
+
+
 class OperationsSummaryResponse(BaseModel):
     evidence_pipeline: list[QueueStageMetrics] = Field(default_factory=list)
     topic_validation_corrections: int = 0
@@ -24,3 +33,4 @@ class OperationsSummaryResponse(BaseModel):
     form_poll_failures: int = 0
     oldest_form_cursor_age_seconds: int | None = None
     approvals_last_24_hours: int = 0
+    taxonomy_runs: TaxonomyRunMetrics = Field(default_factory=TaxonomyRunMetrics)

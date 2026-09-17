@@ -87,13 +87,13 @@ async def _article_response(
     if row is None:
         return None
     theme_rows = await connection.fetch(
-        "SELECT theme_id FROM article_themes WHERE article_id = $1 ORDER BY theme_id",
+        "SELECT stable_theme_id FROM article_themes WHERE article_id = $1 AND stable_theme_id IS NOT NULL ORDER BY stable_theme_id",
         article_id,
     )
     topic_rows = await connection.fetch(
         """
-        SELECT topic_name FROM article_topics
-        WHERE article_id = $1 ORDER BY lower(topic_name), topic_key
+        SELECT topic_name_snapshot FROM article_topics
+        WHERE article_id = $1 ORDER BY lower(topic_name_snapshot), id
         """,
         article_id,
     )
@@ -111,8 +111,8 @@ async def _article_response(
             created_at=row["revision_created_at"],
         ),
         generation_metadata=_json_object(row["generation_metadata"]),
-        theme_ids=[item["theme_id"] for item in theme_rows],
-        topics=[ArticleTopic(name=item["topic_name"]) for item in topic_rows],
+        theme_ids=[item["stable_theme_id"] for item in theme_rows],
+        topics=[ArticleTopic(name=item["topic_name_snapshot"]) for item in topic_rows],
         evidence_count=int(row["evidence_count"]),
         approved_at=row["approved_at"],
         archived_at=row["archived_at"],
@@ -180,11 +180,12 @@ async def list_articles(
         ($1::text IS NULL OR articles.status = $1)
         AND ($2::bigint IS NULL OR EXISTS (
             SELECT 1 FROM article_themes
-            WHERE article_id = articles.id AND theme_id = $2
+            WHERE article_id = articles.id AND stable_theme_id = $2
         ))
         AND ($3::text IS NULL OR EXISTS (
             SELECT 1 FROM article_topics
-            WHERE article_id = articles.id AND topic_key = $3
+            WHERE article_id = articles.id
+              AND lower(btrim(topic_name_snapshot)) = $3
         ))
         AND ($4::text IS NULL OR articles.title ILIKE '%' || $4 || '%')
     """
@@ -283,12 +284,20 @@ async def _current_evidence(
             evidence.citation_id,
             evidence.topic_key,
             COALESCE(segments.segment_text, inputs.original_text) AS text,
-            COALESCE(segments.topic, inputs.topic) AS topic_name
+            COALESCE(revisions.name, topics.topic_name_snapshot) AS topic_name
         FROM article_evidence AS evidence
+        JOIN article_revisions AS article_revisions
+            ON article_revisions.id = evidence.revision_id
         LEFT JOIN original_inputs AS inputs
             ON inputs.id = evidence.original_input_id
         LEFT JOIN segment_inputs AS segments
             ON segments.id = evidence.segment_input_id
+        LEFT JOIN topic_revisions AS revisions
+            ON revisions.taxonomy_run_id = evidence.taxonomy_run_id
+            AND revisions.topic_id::text = evidence.topic_key
+        LEFT JOIN article_topics AS topics
+            ON topics.article_id = article_revisions.article_id
+            AND topics.topic_id::text = evidence.topic_key
         WHERE evidence.revision_id = $1
         ORDER BY evidence.evidence_order
         """,
@@ -435,37 +444,56 @@ async def patch_article(
 
                 if payload.theme_ids is not None or payload.topics is not None:
                     existing_themes = await connection.fetch(
-                        "SELECT theme_id FROM article_themes WHERE article_id = $1",
+                        "SELECT stable_theme_id FROM article_themes WHERE article_id = $1 AND stable_theme_id IS NOT NULL",
                         article_id,
                     )
                     existing_topics = await connection.fetch(
-                        "SELECT topic_name FROM article_topics WHERE article_id = $1",
+                        "SELECT topic_name_snapshot FROM article_topics WHERE article_id = $1",
                         article_id,
                     )
                     themes = await canonical_theme_ids(
                         connection,
                         payload.theme_ids
                         if payload.theme_ids is not None
-                        else [row["theme_id"] for row in existing_themes],
+                        else [row["stable_theme_id"] for row in existing_themes],
                     )
                     topics = (
                         [normalize_topic(item.name) for item in payload.topics]
                         if payload.topics is not None
-                        else [normalize_topic(row["topic_name"]) for row in existing_topics]
+                        else [normalize_topic(row["topic_name_snapshot"]) for row in existing_topics]
                     )
                     if not themes and not topics:
                         raise ValueError("an article requires at least one theme or topic tag")
                     await connection.execute("DELETE FROM article_themes WHERE article_id = $1", article_id)
                     await connection.execute("DELETE FROM article_topics WHERE article_id = $1", article_id)
                     if themes:
+                        theme_rows = await connection.fetch(
+                            "SELECT theme_id, name FROM theme_revisions WHERE taxonomy_run_id=(SELECT id FROM taxonomy_runs WHERE status='published') AND theme_id=ANY($1::bigint[])",
+                            themes,
+                        )
+                        theme_names = {row["theme_id"]: row["name"] for row in theme_rows}
+                        if len(theme_names) != len(themes):
+                            raise ValueError("article theme is outside the published taxonomy")
                         await connection.executemany(
-                            "INSERT INTO article_themes (article_id, theme_id) VALUES ($1, $2)",
-                            [(article_id, item) for item in themes],
+                            "INSERT INTO article_themes (article_id, stable_theme_id, theme_name_snapshot) VALUES ($1, $2, $3)",
+                            [(article_id, item, theme_names[item]) for item in themes],
                         )
                     if topics:
+                        published_run_id = await connection.fetchval("SELECT id FROM taxonomy_runs WHERE status='published'")
+                        if published_run_id is None:
+                            raise ValueError("taxonomy is unavailable")
+                        topic_ids: dict[str, int] = {}
+                        for key, _name in topics:
+                            topic_id = await connection.fetchval(
+                                "SELECT topic_id FROM topic_revisions WHERE taxonomy_run_id=$1 AND normalized_name=$2 ORDER BY id LIMIT 1",
+                                published_run_id, key,
+                            )
+                            if topic_id is None:
+                                raise ValueError("article topic is outside the published taxonomy")
+                            topic_ids[key] = topic_id
                         await connection.executemany(
-                            "INSERT INTO article_topics (article_id, topic_key, topic_name) VALUES ($1, $2, $3)",
-                            [(article_id, key, name) for key, name in dict(topics).items()],
+                            "INSERT INTO article_topics (article_id, topic_id, topic_name_snapshot, taxonomy_run_id) VALUES ($1, $2, $3, $4)",
+                            [(article_id, topic_ids[key], name, published_run_id) for key, name in dict(topics).items()],
                         )
                     await connection.execute(
                         "UPDATE articles SET updated_at = CURRENT_TIMESTAMP WHERE id = $1",
@@ -601,7 +629,7 @@ async def article_evidence(article_id: int, request: Request) -> list[ArticleEvi
                    COALESCE(segments.segment_text, source_inputs.original_text) AS text,
                    source_inputs.id AS source_input_id,
                    source_inputs.original_text,
-                   COALESCE(segments.topic, source_inputs.topic) AS topic_name,
+                   COALESCE(revisions.name, topics.topic_name_snapshot) AS topic_name,
                    source_inputs.source,
                    source_inputs.submission_key,
                    questions.form_key,
@@ -612,6 +640,12 @@ async def article_evidence(article_id: int, request: Request) -> list[ArticleEvi
             JOIN article_evidence AS evidence
                 ON evidence.revision_id = articles.current_revision_id
             LEFT JOIN segment_inputs AS segments ON segments.id = evidence.segment_input_id
+            LEFT JOIN topic_revisions AS revisions
+                ON revisions.taxonomy_run_id = evidence.taxonomy_run_id
+                AND revisions.topic_id::text = evidence.topic_key
+            LEFT JOIN article_topics AS topics
+                ON topics.article_id = articles.id
+                AND topics.topic_id::text = evidence.topic_key
             JOIN original_inputs AS source_inputs
                 ON source_inputs.id = COALESCE(
                     evidence.original_input_id,

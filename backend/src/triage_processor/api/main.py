@@ -12,6 +12,8 @@ from triage_processor.api.routes.form_sources import router as form_sources_rout
 from triage_processor.api.routes.generation import router as generation_router
 from triage_processor.api.routes.inputs import router as inputs_router
 from triage_processor.api.routes.operations import router as operations_router
+from triage_processor.api.routes.taxonomy_review import router as taxonomy_review_router
+from triage_processor.api.routes.taxonomy_legacy_archive import router as taxonomy_legacy_archive_router
 from triage_processor.config import DATABASE_URL
 from triage_processor.observability import configure_logging
 
@@ -38,6 +40,8 @@ app.include_router(dashboard_router)
 app.include_router(form_sources_router)
 app.include_router(inputs_router)
 app.include_router(operations_router)
+app.include_router(taxonomy_review_router)
+app.include_router(taxonomy_legacy_archive_router)
 
 
 @app.middleware("http")

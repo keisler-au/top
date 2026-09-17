@@ -34,22 +34,11 @@ async def canonical_theme_ids(
         return []
     rows = await connection.fetch(
         """
-        WITH RECURSIVE paths AS (
-            SELECT id AS starting_id, id, merged_into_id, ARRAY[id]::bigint[] AS path
-            FROM themes
-            WHERE id = ANY($1::bigint[])
-
-            UNION ALL
-
-            SELECT paths.starting_id, parent.id, parent.merged_into_id,
-                   paths.path || parent.id
-            FROM paths
-            JOIN themes AS parent ON parent.id = paths.merged_into_id
-            WHERE NOT parent.id = ANY(paths.path)
-        )
-        SELECT starting_id, id AS canonical_id
-        FROM paths
-        WHERE merged_into_id IS NULL
+        WITH resolved AS (
+            SELECT requested.id AS starting_id, stable.theme_id AS canonical_id
+            FROM unnest($1::bigint[]) requested(id)
+            JOIN LATERAL resolve_published_theme_id(requested.id) stable ON stable.resolution='resolved'
+        ) SELECT * FROM resolved
         """,
         unique_ids,
     )
@@ -87,21 +76,16 @@ async def resolve_evidence(
             row = await connection.fetchrow(
                 """
                 SELECT
-                    -- article_evidence stores one canonical target.  The parent
-                    -- input is recovered through segment_inputs for provenance,
-                    -- rather than duplicated here.
                     NULL::bigint AS original_input_id,
-                    segments.id AS segment_input_id,
-                    segments.segment_text AS text,
-                    lower(btrim(segments.topic)) AS topic_key,
-                    btrim(segments.topic) AS topic_name
-                FROM segment_inputs AS segments
-                JOIN original_inputs AS inputs
-                    ON inputs.id = segments.original_input_id
+                    evidence.segment_input_id,
+                    segments.segment_text AS text, revisions.topic_id::text AS topic_key,
+                    revisions.name AS topic_name
+                FROM taxonomy_runs runs JOIN taxonomy_run_evidence evidence ON evidence.taxonomy_run_id=runs.id
+                JOIN topic_memberships memberships ON memberships.taxonomy_run_id=runs.id AND memberships.evidence_id=evidence.id
+                JOIN topic_revisions revisions ON revisions.id=memberships.topic_revision_id AND revisions.taxonomy_run_id=runs.id
+                JOIN segment_inputs segments ON segments.id=evidence.segment_input_id
                 WHERE
-                    segments.id = $1
-                    AND inputs.status = 'completed'
-                    AND segments.topic IS NOT NULL
+                    runs.status = 'published' AND evidence.segment_input_id = $1
                 """,
                 numeric_id,
             )
@@ -109,20 +93,16 @@ async def resolve_evidence(
             row = await connection.fetchrow(
                 """
                 SELECT
-                    inputs.id AS original_input_id,
+                    evidence.original_input_id,
                     NULL::bigint AS segment_input_id,
-                    inputs.original_text AS text,
-                    lower(btrim(inputs.topic)) AS topic_key,
-                    btrim(inputs.topic) AS topic_name
-                FROM original_inputs AS inputs
+                    inputs.original_text AS text, revisions.topic_id::text AS topic_key,
+                    revisions.name AS topic_name
+                FROM taxonomy_runs runs JOIN taxonomy_run_evidence evidence ON evidence.taxonomy_run_id=runs.id
+                JOIN topic_memberships memberships ON memberships.taxonomy_run_id=runs.id AND memberships.evidence_id=evidence.id
+                JOIN topic_revisions revisions ON revisions.id=memberships.topic_revision_id AND revisions.taxonomy_run_id=runs.id
+                JOIN original_inputs inputs ON inputs.id=evidence.original_input_id
                 WHERE
-                    inputs.id = $1
-                    AND inputs.status = 'completed'
-                    AND inputs.topic IS NOT NULL
-                    AND NOT EXISTS (
-                        SELECT 1 FROM segment_inputs AS segments
-                        WHERE segments.original_input_id = inputs.id
-                    )
+                    runs.status = 'published' AND evidence.original_input_id = $1 AND evidence.segment_input_id IS NULL
                 """,
                 numeric_id,
             )
@@ -154,9 +134,42 @@ async def create_article_record(
     evidence_citations: Sequence[str | None] | None = None,
     status: str = "draft",
     template_version_id: int | None = None,
+    taxonomy_run_id: int | None = None,
 ) -> tuple[int, int]:
     canonical_themes = await canonical_theme_ids(connection, theme_ids)
     normalized_topics = list(dict(normalize_topic(topic) for topic in topic_names).items())
+    published_topic_ids: dict[str, int] = {}
+    published = await connection.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM taxonomy_runs WHERE status = 'published')"
+    )
+    if not published and taxonomy_run_id is None:
+        raise ValueError("taxonomy is unavailable")
+    published_run_id = taxonomy_run_id or await connection.fetchval("SELECT id FROM taxonomy_runs WHERE status = 'published'")
+    if published:
+        for topic_key, _topic_name in normalized_topics:
+            topic_id = await connection.fetchval(
+                """
+                SELECT revisions.topic_id
+                FROM taxonomy_runs run
+                JOIN topic_revisions revisions ON revisions.taxonomy_run_id = run.id
+                WHERE run.status = 'published'
+                  AND (
+                    revisions.normalized_name = $1
+                    OR EXISTS (
+                        SELECT 1 FROM topic_aliases aliases
+                        WHERE aliases.topic_id = revisions.topic_id
+                          AND aliases.retired_at IS NULL
+                          AND aliases.normalized_alias = $1
+                    )
+                  )
+                ORDER BY revisions.id
+                LIMIT 1
+                """,
+                topic_key,
+            )
+            if topic_id is None:
+                raise ValueError("article topic is outside the published taxonomy")
+            published_topic_ids[topic_key] = topic_id
     if not canonical_themes and not normalized_topics:
         raise ValueError("an article requires at least one theme or topic tag")
     if not evidence:
@@ -199,18 +212,25 @@ async def create_article_record(
         revision_id,
     )
     if canonical_themes:
+        theme_rows = await connection.fetch(
+            "SELECT theme_id, name FROM theme_revisions WHERE taxonomy_run_id=$1 AND theme_id=ANY($2::bigint[])",
+            published_run_id, canonical_themes,
+        )
+        theme_names = {int(row["theme_id"]): row["name"] for row in theme_rows}
+        if len(theme_names) != len(canonical_themes):
+            raise ValueError("article theme is outside the published taxonomy")
         await connection.executemany(
-            "INSERT INTO article_themes (article_id, theme_id) VALUES ($1, $2)",
-            [(article_id, theme_id) for theme_id in canonical_themes],
+            "INSERT INTO article_themes (article_id, stable_theme_id, theme_name_snapshot) VALUES ($1, $2, $3)",
+            [(article_id, theme_id, theme_names[theme_id]) for theme_id in canonical_themes],
         )
     if normalized_topics:
         await connection.executemany(
             """
-            INSERT INTO article_topics (article_id, topic_key, topic_name)
-            VALUES ($1, $2, $3)
+            INSERT INTO article_topics (article_id, topic_id, topic_name_snapshot, taxonomy_run_id)
+            VALUES ($1, $2, $3, $4)
             """,
             [
-                (article_id, topic_key, topic_name)
+                (article_id, published_topic_ids.get(topic_key), topic_name, published_run_id)
                 for topic_key, topic_name in normalized_topics
             ],
         )

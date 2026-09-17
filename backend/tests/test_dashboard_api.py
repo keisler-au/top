@@ -15,6 +15,7 @@ from triage_processor.api.main import app
 
 class StubDashboardConnection:
     def __init__(self) -> None:
+        self.published = True
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.taxonomy_rows: list[dict[str, Any]] = [
             {
@@ -68,6 +69,8 @@ class StubDashboardConnection:
 
     async def fetchval(self, query: str, *args: Any) -> int:
         self.calls.append((query, args))
+        if "SELECT EXISTS (SELECT 1 FROM taxonomy_runs" in query:
+            return self.published
         if "dashboard:taxonomy-count" in query:
             return len(self.taxonomy_rows)
         if "dashboard:evidence-count" in query:
@@ -239,14 +242,32 @@ class DashboardApiTests(unittest.IsolatedAsyncioTestCase):
             "items.",
         )
 
+    async def test_taxonomy_readers_report_unavailable_before_first_publication(self) -> None:
+        self.connection.published = False
+        for path in (
+            "/dashboard/summary",
+            "/taxonomy?type=topic",
+            "/taxonomy/topic/1",
+            "/taxonomy/topic/1/evidence",
+            "/recommendations/articles?type=topic&strategy=most-evidence",
+        ):
+            with self.subTest(path=path):
+                response = await self.client.get(path)
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json()["detail"]["code"], "taxonomy_unavailable")
+
 
 class DashboardQueryContractTests(unittest.TestCase):
+    def test_queries_select_one_published_run_without_mixing_legacy_topics(self):
+        self.assertIn("published_taxonomy_run", CANONICAL_EVIDENCE_CTE)
+        self.assertNotIn("original_inputs.topic", CANONICAL_EVIDENCE_CTE)
+        self.assertNotIn("segment_inputs.topic", CANONICAL_EVIDENCE_CTE)
+
     def test_canonical_evidence_excludes_split_originals(self) -> None:
-        self.assertIn("FROM segment_inputs AS segments", CANONICAL_EVIDENCE_CTE)
-        self.assertIn("AND NOT EXISTS", CANONICAL_EVIDENCE_CTE)
-        self.assertIn("inputs.status = 'completed'", CANONICAL_EVIDENCE_CTE)
-        self.assertIn("'segment:' || segments.id::text", CANONICAL_EVIDENCE_CTE)
-        self.assertIn("'original:' || inputs.id::text", CANONICAL_EVIDENCE_CTE)
+        self.assertIn("taxonomy_run_evidence", CANONICAL_EVIDENCE_CTE)
+        self.assertIn("topic_memberships", CANONICAL_EVIDENCE_CTE)
+        self.assertIn("LEFT JOIN segment_inputs segments", CANONICAL_EVIDENCE_CTE)
+        self.assertIn("COALESCE(evidence.segment_input_id", CANONICAL_EVIDENCE_CTE)
 
     def test_taxonomy_order_uses_fixed_deterministic_tie_breakers(self) -> None:
         query = taxonomy_list_query(

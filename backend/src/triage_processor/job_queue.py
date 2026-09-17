@@ -15,8 +15,6 @@ LOGGER = logging.getLogger(__name__)
 JobType = Literal[
     "eligibility_segmentation",
     "embeddings",
-    "topics",
-    "themes",
 ]
 
 

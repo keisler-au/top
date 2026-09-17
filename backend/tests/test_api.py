@@ -3,6 +3,7 @@ import copy
 import unittest
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,6 +15,18 @@ class ApiStructureTests(unittest.TestCase):
     def test_inputs_route_is_registered(self):
         self.assertIn("/inputs", app.openapi()["paths"])
 
+    def test_input_contract_has_only_stable_taxonomy_associations(self):
+        schema = app.openapi()["components"]["schemas"]["InputResponse"]
+        self.assertNotIn("topic", schema["properties"])
+        self.assertEqual(
+            schema["properties"]["topics"]["items"]["$ref"],
+            "#/components/schemas/TopicResponse",
+        )
+        self.assertEqual(
+            schema["properties"]["themes"]["items"]["$ref"],
+            "#/components/schemas/ThemeResponse",
+        )
+
     def test_article_and_generation_routes_are_registered(self):
         paths = app.openapi()["paths"]
         self.assertIn("/articles", paths)
@@ -24,6 +37,19 @@ class ApiStructureTests(unittest.TestCase):
     def test_operations_summary_route_is_registered(self):
         self.assertIn("/operations/summary", app.openapi()["paths"])
 
+    def test_taxonomy_snapshot_route_is_registered(self):
+        self.assertIn("/taxonomy-runs", app.openapi()["paths"])
+        self.assertIn("post", app.openapi()["paths"]["/taxonomy-runs"])
+
+    def test_legacy_archive_routes_are_registered_and_bounded(self):
+        paths = app.openapi()["paths"]
+        self.assertIn("/taxonomy-legacy-archive", paths)
+        parameters = paths["/taxonomy-legacy-archive/{table_name}"]["get"]["parameters"]
+        limit = next(item for item in parameters if item["name"] == "limit")
+        self.assertEqual(limit["schema"]["maximum"], 100)
+        source = (Path(__file__).parents[1] / "src/triage_processor/api/routes/taxonomy_legacy_archive.py").read_text()
+        self.assertIn('"rollout_reports": "taxonomy_run_id"', source)
+
 
 class FakeDatabase:
     def __init__(self) -> None:
@@ -33,8 +59,8 @@ class FakeDatabase:
         self.next_question_id = 1
         self.next_input_id = 1
         self.segments: list[dict[str, Any]] = []
-        self.themes: dict[int, dict[str, Any]] = {}
-        self.theme_topics: set[tuple[int, str]] = set()
+        self.published_taxonomy_run_id: int | None = None
+        self.published_classifications: dict[int, dict[str, list[dict[str, Any]]]] = {}
         self.last_list_query: str | None = None
         self.last_list_args: tuple[Any, ...] | None = None
         self.transaction_entries = 0
@@ -91,18 +117,9 @@ class FakeConnection:
                 return identity[0], question
         return None
 
-    def _canonical_theme_id(self, theme_id: int) -> int:
-        seen: set[int] = set()
-        while self.database.themes[theme_id]["merged_into_id"] is not None:
-            if theme_id in seen:
-                raise AssertionError("theme merge cycle in fake database")
-            seen.add(theme_id)
-            theme_id = self.database.themes[theme_id]["merged_into_id"]
-        return theme_id
-
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
         statement = " ".join(query.split())
-        if not statement.startswith("WITH RECURSIVE theme_paths"):
+        if not statement.startswith("WITH published_taxonomy_run"):
             raise AssertionError(f"Unexpected SQL: {statement}")
 
         self.database.last_list_query = statement
@@ -156,36 +173,15 @@ class FakeConnection:
             ):
                 continue
 
-            topics = {
-                input_row["topic"]
-            } if input_row["topic"] is not None else set()
-            topics.update(
-                segment["topic"]
-                for segment in self.database.segments
-                if segment["original_input_id"] == input_row["id"]
-                and segment["topic"] is not None
+            classification = self.database.published_classifications.get(
+                input_row["id"], {"topics": [], "themes": []}
             )
-            canonical_ids = {
-                self._canonical_theme_id(theme_id)
-                for theme_id, topic in self.database.theme_topics
-                if any(topic.casefold() == item.casefold() for item in topics)
-            }
-            themes = [
-                {
-                    "id": theme_id,
-                    "name": self.database.themes[theme_id]["name"],
-                    "description": self.database.themes[theme_id][
-                        "description"
-                    ],
-                }
-                for theme_id in sorted(
-                    canonical_ids,
-                    key=lambda item: (
-                        self.database.themes[item]["name"].casefold(),
-                        item,
-                    ),
-                )
-            ]
+            covered = input_row["id"] in self.database.published_classifications
+            taxonomy_state = (
+                "taxonomy_unavailable"
+                if self.database.published_taxonomy_run_id is None
+                else "classified" if covered else "pending_classification"
+            )
             matches.append(
                 {
                     **copy.deepcopy(input_row),
@@ -217,7 +213,10 @@ class FakeConnection:
                         if question is not None
                         else None
                     ),
-                    "themes": themes,
+                    "topics": classification["topics"],
+                    "themes": classification["themes"],
+                    "taxonomy_state": taxonomy_state,
+                    "published_taxonomy_run_id": self.database.published_taxonomy_run_id,
                 }
             )
         return matches[offset : offset + limit]
@@ -580,46 +579,26 @@ class InputApiTests(unittest.IsolatedAsyncioTestCase):
             [2],
         )
 
-    async def test_returns_all_deduplicated_canonical_themes(self) -> None:
+    async def test_returns_only_published_run_classification(self) -> None:
         created = await self.client.post(
             "/inputs",
             json=self.contextual_payload(),
         )
         input_id = created.json()["id"]
         self.database.inputs[0]["status"] = "completed"
-        self.database.segments.extend(
-            [
+        self.database.published_taxonomy_run_id = 44
+        self.database.published_classifications[input_id] = {
+            "topics": [
+                {"id": 7, "name": "Checkout Friction"},
+                {"id": 3, "name": "Cost Barriers"},
+            ],
+            "themes": [
                 {
-                    "original_input_id": input_id,
-                    "topic": "Cost Barriers",
+                    "id": 9,
+                    "name": "Digital Experience",
+                    "description": "Digital journey concerns.",
                 },
-                {
-                    "original_input_id": input_id,
-                    "topic": "Checkout Friction",
-                },
-            ]
-        )
-        self.database.themes = {
-            1: {
-                "name": "Purchasing",
-                "description": "Purchasing concerns.",
-                "merged_into_id": None,
-            },
-            2: {
-                "name": "Old Purchasing",
-                "description": "Merged alias.",
-                "merged_into_id": 1,
-            },
-            3: {
-                "name": "Digital Experience",
-                "description": "Digital journey concerns.",
-                "merged_into_id": None,
-            },
-        }
-        self.database.theme_topics = {
-            (1, "Cost Barriers"),
-            (2, "Cost Barriers"),
-            (3, "Checkout Friction"),
+            ],
         }
 
         response = await self.client.get(
@@ -633,21 +612,47 @@ class InputApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()[0]
         self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["taxonomy_state"], "classified")
+        self.assertEqual(body["published_taxonomy_run_id"], 44)
+        self.assertEqual(body["topics"], [
+            {"id": 7, "name": "Checkout Friction"},
+            {"id": 3, "name": "Cost Barriers"},
+        ])
         self.assertEqual(
             [(theme["id"], theme["name"]) for theme in body["themes"]],
-            [
-                (3, "Digital Experience"),
-                (1, "Purchasing"),
-            ],
+            [(9, "Digital Experience")],
         )
-        self.assertIn(
-            "FROM segment_inputs AS segments",
-            self.database.last_list_query,
-        )
-        self.assertIn(
-            "SELECT DISTINCT canonical.id",
-            self.database.last_list_query,
-        )
+        self.assertIn("published_taxonomy_run", self.database.last_list_query)
+        self.assertIn("topic_revisions", self.database.last_list_query)
+        self.assertIn("theme_revisions", self.database.last_list_query)
+        self.assertNotIn("inputs.topic", self.database.last_list_query)
+        self.assertNotIn("theme_topics", self.database.last_list_query)
+
+    async def test_uncovered_input_is_pending_and_legacy_topic_is_not_exposed(self) -> None:
+        created = await self.client.post("/inputs", json=self.contextual_payload())
+        self.database.inputs[0]["topic"] = "Retired string topic"
+        self.database.published_taxonomy_run_id = 44
+
+        response = await self.client.get("/inputs", params={
+            "source": "customer-survey", "form_key": "quarterly-survey",
+        })
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()[0]
+        self.assertEqual(body["taxonomy_state"], "pending_classification")
+        self.assertEqual(body["topics"], [])
+        self.assertEqual(body["themes"], [])
+        self.assertNotIn("topic", body)
+        self.assertEqual(created.status_code, 201)
+
+    async def test_input_reports_taxonomy_unavailable_without_publication(self) -> None:
+        await self.client.post("/inputs", json=self.contextual_payload())
+        response = await self.client.get("/inputs", params={
+            "source": "customer-survey", "form_key": "quarterly-survey",
+        })
+        body = response.json()[0]
+        self.assertEqual(body["taxonomy_state"], "taxonomy_unavailable")
+        self.assertIsNone(body["published_taxonomy_run_id"])
 
     async def test_retrieval_scope_parameters_require_source_and_form(
         self,

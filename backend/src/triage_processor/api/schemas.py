@@ -47,6 +47,13 @@ class ThemeResponse(BaseModel):
     description: str | None
 
 
+class TopicResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+
+
 class InputResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -54,10 +61,12 @@ class InputResponse(BaseModel):
     original_text: str
     source: str
     status: str
-    topic: str | None
     question_id: int | None
     question_context: QuestionContext | None
     submission_key: str | None
     source_record_key: str | None
     created_at: datetime
+    topics: list[TopicResponse] = Field(default_factory=list)
     themes: list[ThemeResponse] = Field(default_factory=list)
+    taxonomy_state: str = "pending_classification"
+    published_taxonomy_run_id: int | None = None

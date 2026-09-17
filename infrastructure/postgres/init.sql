@@ -450,6 +450,29 @@ EXECUTE FUNCTION enqueue_original_input_job();
 -- migrations to avoid duplicating the larger definitions in this snapshot.
 \ir migrations/013_add_articles.sql
 \ir migrations/014_add_article_generation.sql
+\ir migrations/015_add_taxonomy_runs.sql
+\ir migrations/016_add_taxonomy_cluster_candidates.sql
+\ir migrations/017_add_taxonomy_topic_naming.sql
+\ir migrations/018_add_taxonomy_theme_attempts.sql
+\ir migrations/019_add_taxonomy_publication.sql
+\ir migrations/020_add_taxonomy_run_queue.sql
+\ir migrations/021_add_taxonomy_rollout_reports.sql
+\ir migrations/022_add_taxonomy_quality_snapshots.sql
+\ir migrations/023_add_taxonomy_run_snapshots.sql
+\ir migrations/024_add_taxonomy_run_stages.sql
+\ir migrations/025_add_taxonomy_stage_retry_schedule.sql
+\ir migrations/026_add_taxonomy_theme_reconciliation.sql
+\ir migrations/027_add_taxonomy_model_request_audit.sql
+\ir migrations/028_add_taxonomy_theme_identities.sql
+\ir migrations/029_add_article_taxonomy_snapshots.sql
+\ir migrations/030_add_taxonomy_release_attestations.sql
+\ir migrations/031_add_operations_api_protection.sql
+\ir migrations/032_add_taxonomy_publication_decisions.sql
+\ir migrations/033_add_taxonomy_rollback.sql
+\ir migrations/034_add_taxonomy_legacy_archive.sql
+\ir migrations/035_fix_superseded_publication_consistency.sql
+\ir migrations/036_remove_legacy_taxonomy_runtime.sql
+\ir migrations/037_drop_legacy_taxonomy_schema.sql
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
     filename TEXT PRIMARY KEY,
@@ -471,4 +494,27 @@ VALUES
     ('012_add_topic_assignment_audit.sql'),
     ('013_add_articles.sql'),
     ('014_add_article_generation.sql')
+    ,('015_add_taxonomy_runs.sql')
+    ,('016_add_taxonomy_cluster_candidates.sql')
+    ,('017_add_taxonomy_topic_naming.sql')
+    ,('018_add_taxonomy_theme_attempts.sql')
+    ,('019_add_taxonomy_publication.sql')
+    ,('020_add_taxonomy_run_queue.sql')
+    ,('021_add_taxonomy_rollout_reports.sql')
+    ,('022_add_taxonomy_quality_snapshots.sql')
+    ,('023_add_taxonomy_run_snapshots.sql')
+    ,('024_add_taxonomy_run_stages.sql')
+    ,('025_add_taxonomy_stage_retry_schedule.sql')
+    ,('026_add_taxonomy_theme_reconciliation.sql')
+    ,('027_add_taxonomy_model_request_audit.sql')
+    ,('028_add_taxonomy_theme_identities.sql')
+    ,('029_add_article_taxonomy_snapshots.sql')
+    ,('030_add_taxonomy_release_attestations.sql')
+    ,('031_add_operations_api_protection.sql')
+    ,('032_add_taxonomy_publication_decisions.sql')
+    ,('033_add_taxonomy_rollback.sql')
+    ,('034_add_taxonomy_legacy_archive.sql')
+    ,('035_fix_superseded_publication_consistency.sql')
+    ,('036_remove_legacy_taxonomy_runtime.sql')
+    ,('037_drop_legacy_taxonomy_schema.sql')
 ON CONFLICT DO NOTHING;

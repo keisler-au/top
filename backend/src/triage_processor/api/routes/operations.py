@@ -4,7 +4,9 @@ from fastapi import APIRouter, Request
 from triage_processor.api.operations_schemas import (
     OperationsSummaryResponse,
     QueueStageMetrics,
+    TaxonomyRunMetrics,
 )
+from triage_processor.api.security import require_operator
 
 router = APIRouter(prefix="/operations", tags=["operations"])
 
@@ -27,6 +29,7 @@ def _queue_metrics(row: asyncpg.Record, *, stage: str) -> QueueStageMetrics:
 @router.get("/summary", response_model=OperationsSummaryResponse)
 async def operations_summary(request: Request) -> OperationsSummaryResponse:
     """Return bounded operational counters without queue payloads or source text."""
+    await require_operator(request, mutation=False)
     async with request.app.state.db_pool.acquire() as connection:
         pipeline_rows = await connection.fetch(
             """
@@ -41,21 +44,6 @@ async def operations_summary(request: Request) -> OperationsSummaryResponse:
             FROM worker_jobs
             GROUP BY job_type
             ORDER BY job_type
-            """
-        )
-        topic = await connection.fetchrow(
-            """
-            SELECT
-                count(*) FILTER (WHERE NOT accepted)::bigint AS corrections,
-                (SELECT count(*) FROM worker_jobs WHERE job_type = 'topics' AND status = 'failed')::bigint AS terminal_failures
-            FROM topic_assignment_attempts
-            """
-        )
-        theme = await connection.fetchrow(
-            """
-            SELECT
-                (SELECT max(completed_at) FROM worker_jobs WHERE job_type = 'themes' AND status = 'completed') AS last_refresh,
-                (SELECT count(*) FROM theme_suggestions WHERE materialized_at IS NULL)::bigint AS pending_materializations
             """
         )
         generation = await connection.fetchrow(
@@ -87,12 +75,28 @@ async def operations_summary(request: Request) -> OperationsSummaryResponse:
             WHERE action = 'approved' AND created_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
             """
         )
+        taxonomy = await connection.fetchrow(
+            """
+            SELECT
+                count(*) FILTER (WHERE jobs.status IN ('pending', 'processing'))::bigint AS active,
+                count(*) FILTER (WHERE runs.status = 'ready_for_review')::bigint AS review_backlog,
+                max(runs.published_at) AS last_published_at,
+                count(DISTINCT evidence.id)::bigint AS snapshot_evidence_count,
+                count(DISTINCT memberships.evidence_id) FILTER (WHERE memberships.decision = 'noise')::bigint AS noise_count,
+                count(DISTINCT attempts.id) FILTER (WHERE NOT attempts.accepted)::bigint AS validation_failures
+            FROM taxonomy_runs runs
+            LEFT JOIN taxonomy_run_jobs jobs ON jobs.taxonomy_run_id = runs.id
+            LEFT JOIN taxonomy_run_evidence evidence ON evidence.taxonomy_run_id = runs.id
+            LEFT JOIN taxonomy_cluster_memberships memberships ON memberships.taxonomy_run_id = runs.id
+            LEFT JOIN taxonomy_topic_naming_attempts attempts ON attempts.taxonomy_run_id = runs.id
+            """
+        )
     return OperationsSummaryResponse(
         evidence_pipeline=[_queue_metrics(row, stage=row["stage"]) for row in pipeline_rows],
-        topic_validation_corrections=int(topic["corrections"]),
-        topic_terminal_failures=int(topic["terminal_failures"]),
-        last_theme_refresh_at=theme["last_refresh"],
-        pending_theme_materializations=int(theme["pending_materializations"]),
+        topic_validation_corrections=0,
+        topic_terminal_failures=0,
+        last_theme_refresh_at=None,
+        pending_theme_materializations=0,
         article_generation=_queue_metrics(generation, stage="article_generation"),
         average_generation_duration_seconds=(
             int(generation["average_duration"])
@@ -107,4 +111,9 @@ async def operations_summary(request: Request) -> OperationsSummaryResponse:
             else None
         ),
         approvals_last_24_hours=int(approvals),
+        taxonomy_runs=TaxonomyRunMetrics(
+            active=int(taxonomy["active"]), review_backlog=int(taxonomy["review_backlog"]),
+            snapshot_evidence_count=int(taxonomy["snapshot_evidence_count"]), noise_count=int(taxonomy["noise_count"]),
+            validation_failures=int(taxonomy["validation_failures"]), last_published_at=taxonomy["last_published_at"],
+        ),
     )

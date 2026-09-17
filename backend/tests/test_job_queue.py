@@ -82,7 +82,7 @@ class JobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("FOR UPDATE SKIP LOCKED", connection.fetchrow_calls[0][0])
 
     async def test_completes_only_job_owned_by_worker(self):
-        job = Job(7, "topics", 42, 1, "worker-1")
+        job = Job(7, "embeddings", 42, 1, "worker-1")
         connection = FakeConnection(returned_value=7)
 
         completed = await complete_job(FakePool(connection), job)
@@ -120,7 +120,7 @@ class JobQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("status = 'completed'", connection.fetchval_calls[0][0])
 
     async def test_failure_is_retried_with_exponential_backoff(self):
-        job = Job(7, "topics", 42, 3, "worker-1")
+        job = Job(7, "embeddings", 42, 3, "worker-1")
         settings = QueueSettings(
             lease_seconds=300,
             max_attempts=5,
@@ -144,7 +144,7 @@ class JobQueueTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_failure_moves_job_to_dead_letter_state(self):
-        job = Job(7, "topics", 42, 5, "worker-1")
+        job = Job(7, "embeddings", 42, 5, "worker-1")
         settings = QueueSettings(max_attempts=5)
         connection = FakeConnection(returned_value="failed")
 

@@ -193,7 +193,6 @@ async def create_input(
                     original_text,
                     source,
                     status,
-                    topic,
                     question_id,
                     submission_key,
                     source_record_key,
@@ -214,7 +213,6 @@ async def create_input(
                         original_text,
                         source,
                         status,
-                        topic,
                         question_id,
                         submission_key,
                         source_record_key,
@@ -244,6 +242,12 @@ async def create_input(
 
     response_data = dict(row)
     response_data.setdefault("source_record_key", payload.source_record_key)
+    # New evidence is deliberately outside the immutable published snapshot.
+    # Never use the retired string topic as a provisional classification.
+    response_data["topics"] = []
+    response_data["themes"] = []
+    response_data["taxonomy_state"] = "pending_classification"
+    response_data["published_taxonomy_run_id"] = None
     response_data["question_context"] = (
         {
             key: resolved_question.get(key)
@@ -365,50 +369,43 @@ async def list_inputs(
     async with request.app.state.db_pool.acquire() as connection:
         rows = await connection.fetch(
             """
-            WITH RECURSIVE theme_paths AS (
-                SELECT
-                    themes.id AS starting_id,
-                    themes.id,
-                    themes.merged_into_id,
-                    ARRAY[themes.id]::bigint[] AS path
-                FROM themes
-
-                UNION ALL
-
-                SELECT
-                    theme_paths.starting_id,
-                    parent.id,
-                    parent.merged_into_id,
-                    theme_paths.path || parent.id
-                FROM theme_paths
-                JOIN themes AS parent
-                    ON parent.id = theme_paths.merged_into_id
-                WHERE NOT parent.id = ANY(theme_paths.path)
-            ),
-            canonical_themes AS (
-                SELECT
-                    starting_id,
-                    id AS canonical_id
-                FROM theme_paths
-                WHERE merged_into_id IS NULL
+            WITH published_taxonomy_run AS (
+                SELECT id FROM taxonomy_runs WHERE status = 'published'
             ),
             input_topics AS (
-                SELECT id AS input_id, topic
-                FROM original_inputs
-                WHERE topic IS NOT NULL
-
-                UNION
-
-                SELECT segments.original_input_id, segments.topic
-                FROM segment_inputs AS segments
-                WHERE segments.topic IS NOT NULL
+                SELECT DISTINCT evidence.original_input_id AS input_id,
+                    revisions.topic_id AS id, revisions.name
+                FROM published_taxonomy_run AS published
+                JOIN taxonomy_run_evidence AS evidence
+                    ON evidence.taxonomy_run_id = published.id
+                JOIN topic_memberships AS memberships
+                    ON memberships.taxonomy_run_id = published.id
+                    AND memberships.evidence_id = evidence.id
+                JOIN topic_revisions AS revisions
+                    ON revisions.id = memberships.topic_revision_id
+                    AND revisions.taxonomy_run_id = published.id
+            ),
+            input_themes AS (
+                SELECT DISTINCT evidence.original_input_id AS input_id,
+                    themes.theme_id AS id, themes.name, themes.description
+                FROM published_taxonomy_run AS published
+                JOIN taxonomy_run_evidence AS evidence
+                    ON evidence.taxonomy_run_id = published.id
+                JOIN topic_memberships AS memberships
+                    ON memberships.taxonomy_run_id = published.id
+                    AND memberships.evidence_id = evidence.id
+                JOIN theme_revision_topics AS links
+                    ON links.taxonomy_run_id = published.id
+                    AND links.topic_revision_id = memberships.topic_revision_id
+                JOIN theme_revisions AS themes
+                    ON themes.id = links.theme_revision_id
+                    AND themes.taxonomy_run_id = published.id
             )
             SELECT
                 inputs.id,
                 inputs.original_text,
                 inputs.source,
                 inputs.status,
-                inputs.topic,
                 inputs.question_id,
                 inputs.submission_key,
                 inputs.source_record_key,
@@ -419,6 +416,28 @@ async def list_inputs(
                 questions.question_version,
                 questions.question_text,
                 form_sources.form_id,
+                (SELECT id FROM published_taxonomy_run) AS published_taxonomy_run_id,
+                CASE
+                    WHEN NOT EXISTS (SELECT 1 FROM published_taxonomy_run) THEN 'taxonomy_unavailable'
+                    WHEN EXISTS (
+                        SELECT 1 FROM taxonomy_run_evidence AS evidence
+                        JOIN published_taxonomy_run AS published
+                            ON published.id = evidence.taxonomy_run_id
+                        WHERE evidence.original_input_id = inputs.id
+                    ) THEN 'classified'
+                    ELSE 'pending_classification'
+                END AS taxonomy_state,
+                COALESCE(
+                    (
+                        SELECT jsonb_agg(
+                            jsonb_build_object('id', topics.id, 'name', topics.name)
+                            ORDER BY lower(topics.name), topics.id
+                        )
+                        FROM input_topics AS topics
+                        WHERE topics.input_id = inputs.id
+                    ),
+                    '[]'::jsonb
+                ) AS topics,
                 COALESCE(
                     (
                         SELECT jsonb_agg(
@@ -432,21 +451,9 @@ async def list_inputs(
                                 linked_themes.id
                         )
                         FROM (
-                            SELECT DISTINCT
-                                canonical.id,
-                                canonical.name,
-                                canonical.description
-                            FROM input_topics
-                            JOIN theme_topics
-                                ON lower(theme_topics.topic)
-                                    = lower(input_topics.topic)
-                            JOIN canonical_themes
-                                ON canonical_themes.starting_id
-                                    = theme_topics.theme_id
-                            JOIN themes AS canonical
-                                ON canonical.id
-                                    = canonical_themes.canonical_id
-                            WHERE input_topics.input_id = inputs.id
+                            SELECT id, name, description
+                            FROM input_themes
+                            WHERE input_themes.input_id = inputs.id
                         ) AS linked_themes
                     ),
                     '[]'::jsonb
@@ -499,9 +506,10 @@ async def list_inputs(
             if response_data["question_id"] is not None
             else None
         )
-        themes = response_data["themes"]
-        if isinstance(themes, str):
-            themes = json.loads(themes)
-        response_data["themes"] = themes
+        for association in ("topics", "themes"):
+            value = response_data[association]
+            response_data[association] = (
+                json.loads(value) if isinstance(value, str) else value
+            )
         responses.append(InputResponse.model_validate(response_data))
     return responses

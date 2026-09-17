@@ -366,8 +366,10 @@ async def create_generation_job(
                 """
                 INSERT INTO article_generation_jobs (
                     strategy, taxonomy_type, taxonomy_key, taxonomy_name,
-                    template_version_id, editorial_guidance, status_url
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+                    template_version_id, editorial_guidance, status_url, taxonomy_run_id, stable_theme_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, 'pending',
+                    (SELECT id FROM taxonomy_runs WHERE status='published'),
+                    CASE WHEN $2='theme' THEN $3::bigint ELSE NULL END)
                 RETURNING id
                 """,
                 payload.strategy,
@@ -387,8 +389,9 @@ async def create_generation_job(
                 """
                 INSERT INTO article_generation_job_evidence (
                     job_id, original_input_id, segment_input_id, evidence_order,
-                    evidence_text, topic_key, topic_name
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    evidence_text, topic_key, topic_name, taxonomy_run_id
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7,
+                    (SELECT taxonomy_run_id FROM article_generation_jobs WHERE id=$1))
                 """,
                 [
                     (

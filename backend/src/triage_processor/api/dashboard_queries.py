@@ -1,103 +1,63 @@
 """SQL building blocks for evidence, taxonomy, and article coverage."""
 
 CANONICAL_EVIDENCE_CTE = """
+published_taxonomy_run AS (
+    SELECT id FROM taxonomy_runs WHERE status = 'published'
+),
 canonical_evidence AS (
+    -- A published run is a frozen evidence snapshot.  Do not mix it with
+    -- inputs that arrived after its cutoff or with legacy string assignments.
     SELECT
-        'segment:' || segments.id::text AS evidence_id,
-        'segment'::text AS evidence_type,
-        segments.id AS evidence_numeric_id,
-        inputs.id AS original_input_id,
+        CASE WHEN evidence.segment_input_id IS NULL THEN 'original:' || evidence.original_input_id::text
+             ELSE 'segment:' || evidence.segment_input_id::text END AS evidence_id,
+        CASE WHEN evidence.segment_input_id IS NULL THEN 'original'::text ELSE 'segment'::text END AS evidence_type,
+        COALESCE(evidence.segment_input_id, evidence.original_input_id) AS evidence_numeric_id,
+        evidence.original_input_id,
         segments.segment_order,
-        segments.segment_text AS excerpt,
+        COALESCE(segments.segment_text, inputs.original_text) AS excerpt,
         inputs.original_text,
-        lower(btrim(segments.topic)) AS topic_key,
-        btrim(segments.topic) AS topic_name,
-        inputs.source,
-        inputs.submission_key,
-        inputs.source_record_key,
-        inputs.question_id,
-        inputs.created_at
-    FROM original_inputs AS inputs
-    JOIN segment_inputs AS segments
-        ON segments.original_input_id = inputs.id
-    WHERE
-        inputs.status = 'completed'
-        AND segments.topic IS NOT NULL
-        AND btrim(segments.topic) <> ''
-
-    UNION ALL
-
-    SELECT
-        'original:' || inputs.id::text AS evidence_id,
-        'original'::text AS evidence_type,
-        inputs.id AS evidence_numeric_id,
-        inputs.id AS original_input_id,
-        NULL::integer AS segment_order,
-        inputs.original_text AS excerpt,
-        inputs.original_text,
-        lower(btrim(inputs.topic)) AS topic_key,
-        btrim(inputs.topic) AS topic_name,
-        inputs.source,
-        inputs.submission_key,
-        inputs.source_record_key,
-        inputs.question_id,
-        inputs.created_at
-    FROM original_inputs AS inputs
-    WHERE
-        inputs.status = 'completed'
-        AND inputs.topic IS NOT NULL
-        AND btrim(inputs.topic) <> ''
-        AND NOT EXISTS (
-            SELECT 1
-            FROM segment_inputs AS segments
-            WHERE segments.original_input_id = inputs.id
-        )
+        revisions.topic_id::text AS topic_key,
+        revisions.name AS topic_name,
+        inputs.source, inputs.submission_key, inputs.source_record_key,
+        inputs.question_id, inputs.created_at
+    FROM published_taxonomy_run published
+    JOIN taxonomy_run_evidence evidence ON evidence.taxonomy_run_id = published.id
+    JOIN topic_memberships memberships ON memberships.taxonomy_run_id = published.id
+                                      AND memberships.evidence_id = evidence.id
+    JOIN topic_revisions revisions ON revisions.id = memberships.topic_revision_id
+                                  AND revisions.taxonomy_run_id = published.id
+    JOIN original_inputs inputs ON inputs.id = evidence.original_input_id
+    LEFT JOIN segment_inputs segments ON segments.id = evidence.segment_input_id
 )
 """
 
 CANONICAL_THEME_CTES = """
-theme_paths AS (
-    SELECT
-        themes.id AS starting_id,
-        themes.id,
-        themes.merged_into_id,
-        ARRAY[themes.id]::bigint[] AS path
-    FROM themes
-
-    UNION ALL
-
-    SELECT
-        theme_paths.starting_id,
-        parent.id,
-        parent.merged_into_id,
-        theme_paths.path || parent.id
-    FROM theme_paths
-    JOIN themes AS parent
-        ON parent.id = theme_paths.merged_into_id
-    WHERE NOT parent.id = ANY(theme_paths.path)
-),
 canonical_theme_map AS (
-    SELECT DISTINCT
-        starting_id AS theme_id,
-        id AS canonical_theme_id
-    FROM theme_paths
-    WHERE merged_into_id IS NULL
+    SELECT revisions.theme_id, revisions.theme_id AS canonical_theme_id
+    FROM published_taxonomy_run published
+    JOIN theme_revisions revisions ON revisions.taxonomy_run_id = published.id
 ),
 canonical_theme_topics AS (
     SELECT DISTINCT
-        theme_map.canonical_theme_id AS theme_id,
-        lower(btrim(theme_topics.topic)) AS topic_key
-    FROM theme_topics
-    JOIN canonical_theme_map AS theme_map
-        ON theme_map.theme_id = theme_topics.theme_id
-    WHERE btrim(theme_topics.topic) <> ''
+        themes.theme_id, revisions.topic_id::text AS topic_key
+    FROM published_taxonomy_run published
+    JOIN theme_revisions themes ON themes.taxonomy_run_id = published.id
+    JOIN theme_revision_topics links ON links.taxonomy_run_id = published.id
+                                    AND links.theme_revision_id = themes.id
+    JOIN topic_revisions revisions ON revisions.id = links.topic_revision_id
+                                  AND revisions.taxonomy_run_id = published.id
+),
+canonical_themes AS (
+    SELECT revisions.theme_id, revisions.name, revisions.description
+    FROM published_taxonomy_run published
+    JOIN theme_revisions revisions ON revisions.taxonomy_run_id = published.id
 )
 """
 
 TOPIC_AGGREGATES_CTE = """
 topic_article_counts AS (
     SELECT
-        links.topic_key,
+        links.topic_id::text AS topic_key,
         count(DISTINCT articles.id)::bigint AS article_count,
         count(DISTINCT articles.id) FILTER (
             WHERE articles.status = 'approved'
@@ -105,7 +65,8 @@ topic_article_counts AS (
     FROM article_topics AS links
     JOIN articles ON articles.id = links.article_id
     WHERE articles.status <> 'archived'
-    GROUP BY links.topic_key
+      AND links.topic_id IS NOT NULL
+    GROUP BY links.topic_id::text
 ),
 topic_aggregates AS (
     SELECT
@@ -133,45 +94,41 @@ theme_article_counts AS (
         )::bigint AS approved_article_count
     FROM article_themes AS links
     JOIN canonical_theme_map AS theme_map
-        ON theme_map.theme_id = links.theme_id
+        ON theme_map.theme_id = links.stable_theme_id
     JOIN articles ON articles.id = links.article_id
     WHERE articles.status <> 'archived'
     GROUP BY theme_map.canonical_theme_id
 ),
 theme_aggregates AS (
     SELECT
-        themes.id AS key,
+        themes.theme_id AS key,
         themes.name,
         themes.description,
         count(DISTINCT evidence.evidence_id)::bigint AS evidence_count,
         COALESCE(max(article_counts.article_count), 0)::bigint AS article_count,
         COALESCE(max(article_counts.approved_article_count), 0)::bigint
             AS approved_article_count
-    FROM themes
+    FROM canonical_themes AS themes
     LEFT JOIN canonical_theme_topics AS linked_topics
-        ON linked_topics.theme_id = themes.id
+        ON linked_topics.theme_id = themes.theme_id
     LEFT JOIN canonical_evidence AS evidence
         ON evidence.topic_key = linked_topics.topic_key
     LEFT JOIN theme_article_counts AS article_counts
-        ON article_counts.theme_id = themes.id
-    WHERE themes.merged_into_id IS NULL
-    GROUP BY themes.id, themes.name, themes.description
+        ON article_counts.theme_id = themes.theme_id
+    GROUP BY themes.theme_id, themes.name, themes.description
 )
 """
 
 DASHBOARD_SUMMARY_QUERY = f"""
 -- dashboard:summary
-WITH {CANONICAL_EVIDENCE_CTE}
+WITH RECURSIVE {CANONICAL_EVIDENCE_CTE}, {CANONICAL_THEME_CTES}
 SELECT
     (SELECT count(*) FROM canonical_evidence)::bigint AS evidence_count,
     (
-        SELECT count(*)
-        FROM themes
-        WHERE merged_into_id IS NULL
+        SELECT count(*) FROM canonical_themes
     )::bigint AS theme_count,
     (
-        SELECT count(DISTINCT topic_key)
-        FROM canonical_evidence
+        SELECT count(DISTINCT topic_key) FROM canonical_evidence
     )::bigint AS topic_count,
     (
         SELECT count(*) FROM articles WHERE status <> 'archived'
@@ -193,7 +150,7 @@ def taxonomy_aggregate_ctes(taxonomy_type: str) -> tuple[str, str]:
         )
     if taxonomy_type == "theme":
         return (
-            "WITH RECURSIVE "
+        "WITH RECURSIVE "
             f"{CANONICAL_EVIDENCE_CTE}, {CANONICAL_THEME_CTES}, "
             f"{THEME_AGGREGATES_CTE}",
             "theme_aggregates",
@@ -263,9 +220,9 @@ LIMIT $3
 def taxonomy_detail_query(taxonomy_type: str) -> str:
     ctes, aggregate = taxonomy_aggregate_ctes(taxonomy_type)
     key_predicate = (
-        "key = $1::bigint"
+        "key = (SELECT theme_id FROM resolve_published_theme_id($1::bigint) WHERE resolution = 'resolved')"
         if taxonomy_type == "theme"
-        else "key = lower(btrim($1::text))"
+        else "(key = lower(btrim($1::text)) OR (EXISTS (SELECT 1 FROM published_taxonomy_run) AND key IN (SELECT aliases.topic_id::text FROM topic_aliases aliases WHERE aliases.retired_at IS NULL AND aliases.normalized_alias = lower(btrim($1::text)))))"
     )
     return f"""
 -- dashboard:taxonomy-detail:{taxonomy_type}
@@ -286,7 +243,7 @@ def evidence_scope_ctes(taxonomy_type: str) -> tuple[str, str]:
     if taxonomy_type == "topic":
         return (
             f"WITH {CANONICAL_EVIDENCE_CTE}",
-            "evidence.topic_key = lower(btrim($1::text))",
+            "(evidence.topic_key = lower(btrim($1::text)) OR (EXISTS (SELECT 1 FROM published_taxonomy_run) AND evidence.topic_key IN (SELECT aliases.topic_id::text FROM topic_aliases aliases WHERE aliases.retired_at IS NULL AND aliases.normalized_alias = lower(btrim($1::text)))))",
         )
     if taxonomy_type == "theme":
         return (
@@ -294,7 +251,7 @@ def evidence_scope_ctes(taxonomy_type: str) -> tuple[str, str]:
             f"{CANONICAL_EVIDENCE_CTE}, {CANONICAL_THEME_CTES}",
             "EXISTS ("
             "SELECT 1 FROM canonical_theme_topics AS linked_topics "
-            "WHERE linked_topics.theme_id = $1::bigint "
+            "WHERE linked_topics.theme_id = (SELECT theme_id FROM resolve_published_theme_id($1::bigint) WHERE resolution = 'resolved') "
             "AND linked_topics.topic_key = evidence.topic_key"
             ")",
         )

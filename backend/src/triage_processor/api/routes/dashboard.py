@@ -73,6 +73,18 @@ def _taxonomy_key(taxonomy_type: TaxonomyType, raw_key: str) -> int | str:
     return key
 
 
+async def _require_published_taxonomy(connection: Any) -> None:
+    """Keep every dashboard taxonomy reader on exactly one published run."""
+    available = await connection.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM taxonomy_runs WHERE status = 'published')"
+    )
+    if not available:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": "taxonomy_unavailable"},
+        )
+
+
 def _taxonomy_item(
     row: Any,
     taxonomy_type: TaxonomyType,
@@ -102,6 +114,7 @@ def _taxonomy_item(
 @router.get("/dashboard/summary", response_model=DashboardSummaryResponse)
 async def dashboard_summary(request: Request) -> DashboardSummaryResponse:
     async with request.app.state.db_pool.acquire() as connection:
+        await _require_published_taxonomy(connection)
         row = await connection.fetchrow(DASHBOARD_SUMMARY_QUERY)
     if row is None:
         raise RuntimeError("dashboard summary query returned no row")
@@ -121,6 +134,7 @@ async def list_taxonomy(
     offset = _offset(page, page_size)
     search = _normalized_search(search)
     async with request.app.state.db_pool.acquire() as connection:
+        await _require_published_taxonomy(connection)
         total = await connection.fetchval(
             taxonomy_count_query(taxonomy_type),
             search,
@@ -158,6 +172,7 @@ async def list_taxonomy_evidence(
     offset = _offset(page, page_size)
 
     async with request.app.state.db_pool.acquire() as connection:
+        await _require_published_taxonomy(connection)
         taxonomy = await connection.fetchrow(
             taxonomy_detail_query(taxonomy_type),
             key,
@@ -227,6 +242,7 @@ async def taxonomy_detail(
 ) -> TaxonomyItemResponse:
     key = _taxonomy_key(taxonomy_type, taxonomy_key)
     async with request.app.state.db_pool.acquire() as connection:
+        await _require_published_taxonomy(connection)
         row = await connection.fetchrow(
             taxonomy_detail_query(taxonomy_type),
             key,
@@ -250,6 +266,7 @@ async def article_recommendations(
     limit: Annotated[int, Query(ge=1, le=20)] = 5,
 ) -> RecommendationResponse:
     async with request.app.state.db_pool.acquire() as connection:
+        await _require_published_taxonomy(connection)
         rows = await connection.fetch(
             recommendation_query(taxonomy_type, strategy),
             limit,

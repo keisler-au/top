@@ -1,0 +1,28 @@
+name: Taxonomy verification
+
+on:
+  push:
+    paths:
+      - 'backend/src/triage_processor/taxonomy_*.py'
+      - 'backend/src/triage_processor/api/**'
+      - 'backend/tests/**'
+      - 'infrastructure/postgres/**'
+      - 'compose*.yaml'
+      - 'frontend/src/api/**'
+      - '.github/workflows/taxonomy-verification.yml'
+  pull_request:
+    paths:
+      - 'backend/src/triage_processor/taxonomy_*.py'
+      - 'backend/src/triage_processor/api/**'
+      - 'backend/tests/**'
+      - 'infrastructure/postgres/**'
+      - 'compose*.yaml'
+      - 'frontend/src/api/**'
+      - '.github/workflows/taxonomy-verification.yml'
+
+jobs:
+  postgres-pgvector:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from tests

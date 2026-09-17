@@ -183,7 +183,7 @@ async def process_job(
             """
             SELECT jobs.strategy, jobs.taxonomy_type, jobs.taxonomy_key,
                    jobs.taxonomy_name, jobs.editorial_guidance,
-                   jobs.template_version_id, versions.html_source
+                   jobs.template_version_id, jobs.taxonomy_run_id, versions.html_source
             FROM article_generation_jobs AS jobs
             JOIN article_template_versions AS versions
                 ON versions.id = jobs.template_version_id
@@ -280,6 +280,7 @@ async def process_job(
                 evidence_citations=[item.evidence_id for item in resolved],
                 status="ready_for_review",
                 template_version_id=row["template_version_id"],
+                taxonomy_run_id=row["taxonomy_run_id"],
             )
             await connection.execute(
                 """
