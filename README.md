@@ -110,6 +110,8 @@ The sole published run is the source for all taxonomy readers and generation.
 │   ├── pyproject.toml
 │   └── uv.lock
 ├── frontend/
+│   ├── admin/                # opt-in, loopback-only administrative dashboard
+│   └── public/               # dependency-free internet-facing nginx edge
 ├── infrastructure/postgres/
 ├── docs/
 └── compose.yaml
@@ -164,11 +166,26 @@ Start the full stack with:
 docker compose up --build
 ```
 
+The default external service is `public-web`, bound to
+`http://localhost:${PUBLIC_PORT:-8080}`. It exposes only the public editorial
+routes, health, and self-hosted assets; it never exposes the internal `/_site`
+renderer or administrative APIs. Set `PUBLIC_SITE_ORIGIN` to the public
+absolute `http(s)` origin (no path, query, fragment, or credentials),
+`PUBLIC_SITE_NAME`, and optional `PUBLIC_SITE_DESCRIPTION` for canonical,
+Open Graph, JSON-LD, sitemap, and robots output. Those values are deployment
+configuration, never inferred from a request Host header.
+
 The administrative dashboard is an opt-in local-only profile. Start it with
 `docker compose --profile admin up --build`; it is available at
 `http://127.0.0.1:8081` by default and proxies its internal `/api/*` requests
 to FastAPI. PostgreSQL, Ollama, and the API remain on the internal Compose
 network. Set `ADMIN_PORT` to choose a different loopback port.
+
+If the public edge is unhealthy, inspect it with
+`docker compose logs public-web`, then recreate only that stateless service
+with `docker compose up --build --force-recreate public-web`. Do not expose
+`admin-web` as a recovery substitute: it intentionally proxies internal API
+routes and remains loopback-only.
 
 On first startup, the `ollama-init` service downloads the default
 `qwen3:4b-instruct` chat model and `nomic-embed-text` embedding model before the workers
@@ -191,12 +208,12 @@ discarding all local database data and downloaded models.
 Compose environment variables can override the defaults, for example:
 
 ```bash
-DASHBOARD_PORT=8081 LLM_MODEL=qwen3:4b-instruct docker compose up --build
+PUBLIC_PORT=8082 LLM_MODEL=qwen3:4b-instruct docker compose up --build
 ```
 
 The main runtime settings are `POSTGRES_DB`, `POSTGRES_USER`,
 `POSTGRES_PASSWORD`, `LLM_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `LLM_API_KEY`, and
-the worker queue settings documented below. Keep secrets in `.env` (which is
+the public-site settings and worker queue settings documented below. Keep secrets in `.env` (which is
 ignored by Git) or your deployment secret store; never put credentials in the
 Compose file. `LLM_API_KEY` is only needed for a compatible external model
 endpoint.
@@ -210,6 +227,7 @@ taxonomy readers.
 For local dashboard development, run `npm ci && npm run dev` in `frontend/admin/` and
 run the API separately on port 8000. The development server proxies `/api` to
 that local API; Compose dashboard traffic goes through the `admin-web` service.
+The public edge has no browser API client or admin API access.
 
 ### Backup and restore
 
@@ -229,6 +247,12 @@ docker compose exec -T postgres createdb -U postgres triage
 docker compose exec -T postgres pg_restore -U postgres -d triage --clean --if-exists < triage.backup
 docker compose up -d
 ```
+
+Restore the complete database only: `article_publications` and their
+revision-scoped `article_publication_themes` snapshots are restored alongside
+the batch taxonomy and legacy archive. Returning an approved article to draft
+or archiving it withdraws it; reapproval restores its permanent URL with a new
+immutable snapshot. Taxonomy changes never rewrite published article snapshots.
 
 The Google Sheets importer is optional and starts only with the
 `google-sheets` profile. Mount a service-account JSON file through

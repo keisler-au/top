@@ -3,7 +3,8 @@
 ## Components
 
 ```text
-frontend (framework-free Web Components)
+public-web (allowlisted public HTML, discovery documents, and self-hosted assets)
+admin-web (framework-free Web Components, explicit admin profile)
     -> /api proxy -> FastAPI routes
         -> PostgreSQL + pgvector
         -> Ollama chat and embedding APIs
@@ -11,11 +12,45 @@ frontend (framework-free Web Components)
         -> article-generation worker
 ```
 
-`backend/` is a Python `src` project. `frontend/` is a framework-free
-TypeScript/Web Components application. `infrastructure/postgres/` contains the
+`backend/` is a Python `src` project. `frontend/admin/` is a framework-free
+TypeScript/Web Components administrative application; `frontend/public/` is a
+dependency-free static public edge. `infrastructure/postgres/` contains the
 fresh-install schema and ordered migrations; `compose.yaml` connects runtime
 services. The API owns HTTP validation, `clients/` owns model communication,
 and workers own background processing.
+
+`article_publications` is the minimal public-projection boundary. It records an
+article's approved immutable revision, permanent slug, and publication times;
+`article_publication_themes` preserves the stable batch-theme display snapshot
+for that revision. Neither relation contains evidence, source inputs,
+generation metadata, editorial audit data, prompts, or taxonomy descriptions.
+The projection is populated by its transactional migration backfill and by the
+same transaction that approves an article. Reapproval advances the projection
+to the new immutable revision while preserving the original slug and
+first-publication time; prior revision-scoped theme snapshots remain immutable.
+Public read routes are served by this projection-only renderer and public edge.
+Taxonomy lineage can change as runs are published or rolled back, but it never
+mutates an approved article's revision-scoped public theme display snapshot.
+
+The internal `/_site` renderer is server-rendered HTML only. It queries only
+the active approved projection and its revision-scoped batch-theme snapshots;
+it neither invokes nor mirrors administrative JSON APIs. The public nginx edge
+does not route to it until the separately verified rewrite package.
+
+`public-web` rewrites only `/`, `/insights`, `/insights/{slug}`, `/themes`,
+`/themes/{id}-{slug}`, `/about`, `robots.txt`, and `sitemap.xml` to that
+internal renderer. Its named internal 404 handler returns the renderer's
+generic public 404 for all other paths; direct `/_site`, API, and dashboard
+paths remain unavailable at the edge.
+
+`PUBLIC_SITE_ORIGIN` is a validated absolute HTTP(S) origin with no path,
+query, fragment, or credentials. Along with `PUBLIC_SITE_NAME` and optional
+`PUBLIC_SITE_DESCRIPTION`, it is the sole source for canonical, Open Graph,
+JSON-LD, and sitemap URLs; request Host is never consulted. Public discovery
+includes only allowlisted pages, active projection articles, and active public
+themes. The nginx edge applies a scriptless, self-host-only CSP, denies frames
+and browser capabilities, uses short shared caching for HTML/discovery and
+unhashed assets, and reserves immutable caching for content-hashed assets.
 
 ## Backend responsibilities
 

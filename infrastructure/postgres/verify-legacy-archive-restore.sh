@@ -10,13 +10,19 @@ restore_database=${3:?usage: verify-legacy-archive-restore.sh BACKUP_FILE SOURCE
 source_manifest=$(psql -XAt -d "$source_database" -c "SELECT archive_sha256 || ':' || table_hashes::text FROM taxonomy_legacy_archive.exports ORDER BY id DESC LIMIT 1")
 source_batch_runs=$(psql -XAt -d "$source_database" -c "SELECT count(*) FROM taxonomy_runs")
 source_rollout_reports=$(psql -XAt -d "$source_database" -c "SELECT count(*) FROM taxonomy_legacy_archive.rollout_reports")
+source_publications=$(psql -XAt -d "$source_database" -c "SELECT count(*) FROM article_publications")
+source_publication_snapshots=$(psql -XAt -d "$source_database" -c "SELECT count(*) FROM article_publication_themes")
 dropdb --if-exists "$restore_database"
 createdb "$restore_database"
 pg_restore --exit-on-error --clean --if-exists -d "$restore_database" "$archive_file"
 restored_manifest=$(psql -XAt -d "$restore_database" -c "SELECT archive_sha256 || ':' || table_hashes::text FROM taxonomy_legacy_archive.exports ORDER BY id DESC LIMIT 1")
 restored_batch_runs=$(psql -XAt -d "$restore_database" -c "SELECT count(*) FROM taxonomy_runs")
 restored_rollout_reports=$(psql -XAt -d "$restore_database" -c "SELECT count(*) FROM taxonomy_legacy_archive.rollout_reports")
+restored_publications=$(psql -XAt -d "$restore_database" -c "SELECT count(*) FROM article_publications")
+restored_publication_snapshots=$(psql -XAt -d "$restore_database" -c "SELECT count(*) FROM article_publication_themes")
 [ "$source_manifest" = "$restored_manifest" ]
 [ "$source_batch_runs" = "$restored_batch_runs" ]
 [ "$source_rollout_reports" = "$restored_rollout_reports" ]
+[ "$source_publications" = "$restored_publications" ]
+[ "$source_publication_snapshots" = "$restored_publication_snapshots" ]
 psql -XAt -d "$restore_database" -c "SELECT count(*) FROM taxonomy_legacy_archive.segment_topics st JOIN taxonomy_legacy_archive.input_topics it ON it.original_input_id=st.original_input_id" >/dev/null

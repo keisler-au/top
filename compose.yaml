@@ -73,6 +73,9 @@ services:
       TAXONOMY_REVIEW_TOKEN: ${TAXONOMY_REVIEW_TOKEN:-}
       OPERATIONS_RATE_LIMIT_REQUESTS: ${OPERATIONS_RATE_LIMIT_REQUESTS:-30}
       OPERATIONS_RATE_LIMIT_WINDOW_SECONDS: ${OPERATIONS_RATE_LIMIT_WINDOW_SECONDS:-60}
+      PUBLIC_SITE_ORIGIN: ${PUBLIC_SITE_ORIGIN:-http://localhost:8080}
+      PUBLIC_SITE_NAME: ${PUBLIC_SITE_NAME:-Evidence-led insights}
+      PUBLIC_SITE_DESCRIPTION: ${PUBLIC_SITE_DESCRIPTION:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 5s
@@ -93,6 +96,16 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:${ADMIN_PORT:-8081}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  public-web:
+    build:
+      context: ./frontend/public
+    restart: unless-stopped
+    ports:
+      - "${PUBLIC_PORT:-8080}:8080"
     depends_on:
       api:
         condition: service_healthy

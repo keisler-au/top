@@ -9,16 +9,46 @@ services:
       POSTGRES_PASSWORD: test-only
     tmpfs:
       - /var/lib/postgresql/data
+    volumes:
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./infrastructure/postgres/migrations:/docker-entrypoint-initdb.d/migrations:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d triage_test"]
       interval: 1s
       timeout: 5s
       retries: 30
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://postgres:test-only@postgres:5432/triage_test
+      PUBLIC_SITE_ORIGIN: https://library.example.test
+      PUBLIC_SITE_NAME: Test public library
+      PUBLIC_SITE_DESCRIPTION: A test-only public library.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 1s
+      timeout: 3s
+      retries: 20
+  public-web:
+    build: ./frontend/public
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 1s
+      timeout: 3s
+      retries: 15
+    depends_on:
+      api:
+        condition: service_healthy
   tests:
     build: ./backend
     environment:
       TRIAGE_TEST_DATABASE_URL: postgresql://postgres:test-only@postgres:5432/triage_test
       PYTHONPATH: /app/src
+      PUBLIC_EDGE_BASE_URL: http://public-web:8080
+      PUBLIC_API_BASE_URL: http://api:8000
     volumes:
       - ./compose.yaml:/compose.yaml:ro
       - ./backend/src:/app/src:ro
@@ -28,4 +58,6 @@ services:
     command: ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
     depends_on:
       postgres:
+        condition: service_healthy
+      public-web:
         condition: service_healthy

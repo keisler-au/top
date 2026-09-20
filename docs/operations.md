@@ -11,10 +11,28 @@ docker compose up --build
 docker compose down
 ```
 
-The administrative dashboard is deliberately not part of the default topology.
+`public-web` is the only default host-published web service, bound to
+`${PUBLIC_PORT:-8080}`. It serves only the allowlisted public editorial routes,
+discovery documents, self-hosted assets, and `/healthz`; `/_site` and all
+administrative/API paths remain unavailable. The administrative dashboard is
+deliberately not part of the default topology.
 Use `docker compose --profile admin up --build` to start `admin-web`, bound only
-to `127.0.0.1:${ADMIN_PORT:-8081}`. The forthcoming public edge is a separate
-service and must not be replaced by the admin dashboard.
+to `127.0.0.1:${ADMIN_PORT:-8081}`. The public edge must not be replaced by the
+admin dashboard.
+
+### Public-edge recovery
+
+The public edge is stateless. Check its health and nginx startup output with
+`docker compose ps public-web` and `docker compose logs public-web`. Rebuild
+only that service with `docker compose up --build --force-recreate public-web`
+when its image or static assets need recovery. Do not add broad proxying or
+publish `admin-web` as a substitute. Set `PUBLIC_SITE_ORIGIN` to the deployed
+absolute HTTP(S) origin (without path/query/fragment/credentials), plus
+`PUBLIC_SITE_NAME` and optional `PUBLIC_SITE_DESCRIPTION`; invalid settings
+prevent API startup. These values control canonical/sitemap/Open Graph/JSON-LD
+URLs. HTML and discovery responses have a five-minute shared cache; only
+content-hashed assets are immutable. Public errors are generic and the edge
+enforces its self-host-only, scriptless CSP and restrictive browser policies.
 
 The `migrate` service applies numbered SQL files from
 `infrastructure/postgres/migrations/` and records them in `schema_migrations`.
@@ -137,6 +155,12 @@ docker compose exec -T postgres pg_dump -U postgres -d triage -Fc > triage.backu
 
 Restore only after confirming the exact target database and stopping the
 application services. See the root README for the restore command sequence.
+Use the complete custom-format backup: it contains `article_publications` and
+`article_publication_themes` in addition to taxonomy runs and the immutable
+legacy archive. `verify-legacy-archive-restore.sh` compares the public
+projection and theme-snapshot counts as part of its isolated restore check.
+Do not reconstruct public data from the current taxonomy: approval snapshots
+are immutable, and taxonomy lineage changes never rewrite them.
 
 ### Legacy taxonomy archive
 

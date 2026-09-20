@@ -32,14 +32,14 @@ requirements have been verified and recorded here.
 | BT-WP7c destructive legacy schema removal | **Complete** | BT-WP7b | Migration `037`; 172-test PostgreSQL+pgvector upgrade/clean-install suite and complete-backup restore verification passed |
 | BT-WP8 hardening and documentation closure | **Complete** | BT-WP7c | 175-test PostgreSQL+pgvector CI-equivalent run, frontend verification, retirement guard, and documentation review passed |
 | PW-WP1a admin relocation | **Complete** | BT-WP8 | `frontend/admin` npm build/test artifact, Compose admin-profile topology, and 177-test PostgreSQL+pgvector verification passed |
-| PW-WP1b public edge isolation | In progress | PW-WP1a | Compose edge-isolation test/job and topology documentation |
-| PW-WP2a public projection schema/backfill | Blocked | PW-WP1b | PostgreSQL migration/backfill job |
-| PW-WP2b approval projection transaction | Blocked | PW-WP2a | Approval rollback and projection-contract job |
-| PW-WP3a server-rendered public query routes | Blocked | PW-WP2b | Route/HTML contract job |
-| PW-WP3b public-edge rewrites and 404s | Blocked | PW-WP3a | Public-edge container route job |
-| PW-WP4 public interface and accessibility | Blocked | PW-WP3b | Responsive HTML/accessibility test job and asset-contract version |
-| PW-WP5 discovery, caching, and public security | Blocked | PW-WP4 | Header/sitemap/security test job and configuration version |
-| PW-WP6 public end-to-end verification and operations | Blocked | PW-WP5 | Compose E2E/restore artifact and documentation review record |
+| PW-WP1b public edge isolation | **Complete** | PW-WP1a | Dependency-free `public-web` nginx edge; 180-test PostgreSQL+pgvector Compose isolation run passed |
+| PW-WP2a public projection schema/backfill | **Complete** | PW-WP1b | Migration `038`; 181-test PostgreSQL+pgvector schema/backfill verification passed |
+| PW-WP2b approval projection transaction | **Complete** | PW-WP2a | Atomic approval/reapproval projection and rollback verification; 183-test PostgreSQL+pgvector run passed |
+| PW-WP3a server-rendered public query routes | **Complete** | PW-WP2b | Internal `/_site` public-projection renderer; 184-test PostgreSQL+pgvector route/HTML verification passed |
+| PW-WP3b public-edge rewrites and 404s | **Complete** | PW-WP3a | Named nginx rewrites and edge 404 topology; 184-test PostgreSQL+pgvector Compose run passed |
+| PW-WP4 public interface and accessibility | **Complete** | PW-WP3b | Public-only responsive CSS and HTML contract; 185-test PostgreSQL+pgvector Compose run passed |
+| PW-WP5 discovery, caching, and public security | **Complete** | PW-WP4 | Public-site configuration v1; 187-test PostgreSQL+pgvector Compose header/sitemap/security run passed |
+| PW-WP6 public end-to-end verification and operations | **Complete** | PW-WP5 | 189-test PostgreSQL+pgvector Compose E2E run, public lifecycle fixture, restore projection verification, and documentation review passed |
 
 When a package completes, replace its status with **Complete**, add the
 evidence immediately below its acceptance criteria, and advance only its
@@ -1222,6 +1222,74 @@ contracts.
   default and included it only with `docker compose --profile admin config
   --services`.
 
+## PW-WP1b — Public edge isolation
+
+### Objective
+
+Separate the internet-facing public delivery path from the internal dashboard
+without exposing its APIs.
+
+### Work
+
+- Create dependency-free `frontend/public` assets, Dockerfile, and nginx
+  configuration. The public edge serves only assets, favicon, and health until
+  PW-WP3a explicitly implements its page routes; unknown paths are `404`.
+- Replace the externally published dashboard service with `public-web` on
+  `${PUBLIC_PORT:-8080}`. Keep `admin-web` in the explicit `admin` profile on
+  `127.0.0.1:${ADMIN_PORT:-8081}`; PostgreSQL, Ollama, API, workers, and the
+  importer remain internal.
+- Prove nginx never directly proxies `/api/*`, `/_site/*`, `/articles*`,
+  `/inputs*`, `/operations*`, `/form-sources*`, generation routes, or taxonomy
+  routes. Only PW-WP3b may introduce its named internal-renderer rewrites.
+- Update Compose, root/frontend/operations documentation, ports, profiles, and
+  public-edge recovery guidance in the same change.
+
+### Automated acceptance criteria
+
+- Default Compose exposes `public-web`; the `admin` profile exposes the
+  dashboard only on loopback.
+- Container tests receive `200` for public health/assets and `404` for every
+  forbidden route, including a direct `/_site/*` request.
+
+### Completion checklist
+
+- [x] Objective — the internet-facing delivery path is separate from the
+  internal dashboard and exposes no dashboard API.
+- [x] Work — `frontend/public` contains dependency-free nginx assets,
+  Dockerfile, favicon, and configuration; before PW-WP3a, all non-static,
+  non-health paths return `404`.
+- [x] Work — `public-web` is the default `${PUBLIC_PORT:-8080}` service, while
+  `admin-web` remains profile-gated and loopback-bound; application services
+  remain internal.
+- [x] Work — nginx has no proxy or fallback and denies direct API, internal
+  renderer, article, input, operations, form-source, generation, and taxonomy
+  paths; PW-WP3b alone may add declared route rewrites.
+- [x] Work — Compose and root, frontend, architecture, and operations
+  documentation describe the public boundary, ports, profiles, and stateless
+  recovery procedure.
+- [x] Automated acceptance criteria — default/admin Compose topology is
+  verified, with `public-web` exposed by default and `admin-web` loopback-only
+  under its profile.
+- [x] Automated acceptance criteria — built-container HTTP tests receive `200`
+  for `/healthz`, `/favicon.svg`, and `/assets/site.css`, and `404` for every
+  forbidden route including direct `/_site/`.
+
+### Completion evidence
+
+- `frontend/public` provides the dependency-free nginx image. Its deny-by-
+  default configuration has no `proxy_pass`; only `/healthz`, `/favicon.svg`,
+  and `/assets/*` are served until the later named-route package.
+- `public-web` is the default Compose web service on `${PUBLIC_PORT:-8080}`;
+  `admin-web` remains in the `admin` profile and binds only
+  `127.0.0.1:${ADMIN_PORT:-8081}`. The Compose test topology builds the edge
+  and supplies `PUBLIC_EDGE_BASE_URL` to its container test.
+- `tests.test_public_edge_isolation` statically checks the topology and nginx
+  boundary, then makes HTTP requests from the disposable test container for
+  the allowed resources and denied internal paths.
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit
+  --exit-code-from tests` passed: 180 tests, including the public-edge
+  isolation test against the built nginx container and PostgreSQL+pgvector.
+
 ## Superseded combined scope — PW-WP2
 
 Implement PW-WP2a for schema/backfill before PW-WP2b changes the approval
@@ -1266,6 +1334,125 @@ article approval and batch-stable theme snapshots.
 - A failed audit or projection write rolls back the article transition; no
   public query or response contains prohibited fields.
 
+## PW-WP2a — Public projection schema and backfill
+
+### Objective
+
+Create the durable, minimal public-publication projection and transactionally
+backfill only approved articles with batch-stable theme associations. Approval
+refresh and public query models are intentionally delivered by PW-WP2b and
+PW-WP3a respectively.
+
+### Work
+
+- Add the next ordered migration for `article_publications` and immutable
+  publication-theme snapshot rows. Each projection records article ID,
+  approved revision ID, deterministic permanent slug, first-publication time,
+  update time, and stable theme identity/display-name snapshots. Enforce that
+  the revision belongs to the article and every theme identity is batch-only.
+- Backfill already approved articles transactionally from immutable revisions
+  and migrated batch-theme associations. Do not copy source evidence or legacy
+  taxonomy rows into any public table.
+
+### Automated acceptance criteria
+
+- PostgreSQL tests cover empty/current/batch-only upgrades, deterministic slug
+  uniqueness, revision/article integrity, theme-snapshot integrity, and
+  backfill correctness.
+
+### Completion checklist
+
+- [x] Objective — a durable minimal public projection exists for approved
+  immutable revisions and batch-stable theme display snapshots, while approval
+  refresh and public reads remain scoped to their direct successor packages.
+- [x] Work — migration `038` creates `article_publications` with its permanent
+  deterministic slug, publication timestamps, unique slug, and composite
+  article/revision integrity constraint; immutable theme snapshots preserve
+  their associated approved revision and enforce a batch identity.
+- [x] Work — the migration transactionally backfills only approved articles
+  whose associations are wholly migrated stable-theme snapshots. It copies no
+  evidence, source, legacy taxonomy, generation, or audit data.
+- [x] Automated acceptance criteria — fresh/current and populated batch-only
+  PostgreSQL migration paths verify schema markers, deterministic slug
+  uniqueness, revision/article integrity, batch-theme and snapshot immutability,
+  and correct approved-only backfill.
+
+### Completion evidence
+
+- `038_add_article_publications.sql` adds the projection and immutable,
+  revision-scoped `article_publication_themes`; `init.sql` includes and marks
+  the migration for fresh installs.
+- `test_publication_projection_backfills_only_approved_batch_articles` creates
+  a populated batch-only upgrade fixture. It verifies the stable revision and
+  theme snapshot, excludes a legacy-only approved association and a draft,
+  rejects a cross-article revision, duplicate slug, and orphan identity, and
+  rejects mutation of a stored snapshot.
+- `docs/architecture.md` records the public-projection boundary and explicitly
+  identifies the successor packages that own refresh and public reads.
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit
+  --exit-code-from tests` passed: 181 tests against PostgreSQL+pgvector.
+
+## PW-WP2b — Approval projection transaction
+
+### Objective
+
+Atomically tie the durable public projection to article approval and preserve
+the prior immutable public-theme snapshots across reapproval.
+
+### Work
+
+- Extend approval to create or refresh the projection in its existing
+  transaction after approval prerequisites pass. Preserve the original slug
+  and first-publication timestamp; a reapproval moves the active projection
+  to the new immutable revision and appends its theme snapshots atomically.
+
+### Automated acceptance criteria
+
+- Draft, returned, review, and archived articles do not create a new active
+  public projection; an approved article does, and reapproval preserves its
+  URL while advancing the projection to its new immutable revision.
+- Batch lifecycle changes cannot mutate an existing article's stored public
+  theme display snapshot; reapproval records a distinct snapshot instead.
+- A failed audit or projection write rolls back the article transition. Public
+  query models and responses remain the responsibility of PW-WP3a and expose
+  no fields in this package.
+
+### Completion checklist
+
+- [x] Objective — an approved article's active durable projection is created
+  in the same transaction, and earlier revision-scoped public-theme snapshots
+  remain immutable across reapproval.
+- [x] Work — approval invokes `_refresh_article_publication` after its existing
+  prerequisites and audit write. It preserves the first slug and publication
+  time, advances only the active approved revision and update time, and appends
+  batch-theme name snapshots without rewriting prior rows.
+- [x] Automated acceptance criteria — integration coverage proves draft,
+  review, and archived articles have no active projection before approval;
+  approval creates one and reapproval preserves the URL/time while advancing
+  to the new immutable revision.
+- [x] Automated acceptance criteria — old and new revision/theme snapshots
+  coexist with their original display names, so later taxonomy or association
+  changes cannot rewrite the earlier public snapshot.
+- [x] Automated acceptance criteria — injected audit and projection-write
+  failures each roll back status, approval time, audit, and projection rows;
+  no public read model is introduced before PW-WP3a.
+
+### Completion evidence
+
+- `api/routes/articles.py` now refreshes `article_publications` and appends
+  `article_publication_themes` inside the existing approval transaction.
+- `test_approval_projection_is_atomic_and_reapproval_preserves_history`
+  verifies draft/review/archive exclusion before approval, first approval,
+  return/edit/reapproval, preserved URL and first-publication time, and both
+  immutable snapshot generations.
+- `test_approval_projection_failure_rolls_back_the_transition` and the
+  existing injected audit failure test prove either failed durable write rolls
+  back the complete transition and leaves no projection.
+- `docs/architecture.md` records the approval transaction and immutable
+  revision-snapshot boundary. `docker compose -f compose.test.yaml up --build
+  --abort-on-container-exit --exit-code-from tests` passed: 183 tests against
+  PostgreSQL+pgvector.
+
 ## Superseded combined scope — PW-WP3
 
 Implement PW-WP3a server routes before PW-WP3b exposes nginx rewrites. A
@@ -1307,6 +1494,135 @@ batch-stable public theme identities.
 - HTML tests verify structural accessibility, canonical metadata, and article
   content available without JavaScript.
 
+## PW-WP3a — Server-rendered public query routes
+
+### Objective
+
+Serve a small internal HTML surface that reads only the active public
+projection and batch-stable public theme identities. PW-WP3b alone exposes its
+declared routes through nginx.
+
+### Work
+
+- Implement `triage_processor.public_site` schema, query, service, and
+  rendering modules plus a thin internal `/_site` HTML route module. Do not
+  add public versions of administrative JSON APIs.
+- Implement home, library, detail, theme directory/detail, about, sitemap,
+  robots, and generic `404` pages. Bound library pagination (default 12,
+  maximum 48, offset at most 10,000), trim search, and parameterize queries.
+- Resolve theme URLs through stable batch lineage and select only themes linked
+  to active public projections. Related articles share a stable identity,
+  exclude the current article, order by shared-theme count then update time,
+  and cap at three.
+- Escape shell data, sanitize rendered article HTML again at the public
+  boundary, and render canonical metadata, a skip link, semantic landmarks,
+  one page `h1`, and intentional empty states.
+
+### Automated acceptance criteria
+
+- Route tests cover every declared internal page, pagination/search bounds and
+  escaping, empty states, stale/unknown themes, and absence after an article
+  is no longer approved.
+- HTML tests verify structural accessibility, canonical metadata, and article
+  content without JavaScript. Edge routing and public-edge direct-path `404`s
+  are deliberately verified by PW-WP3b.
+
+### Completion checklist
+
+- [x] Objective — `/_site` serves a server-rendered, projection-only HTML
+  surface while the public nginx edge remains deny-by-default until PW-WP3b.
+- [x] Work — public-site schemas, parameterized queries, service functions,
+  renderer, and an internal HTML-only router are implemented; no public admin
+  JSON contract was added.
+- [x] Work — home, insights/library, detail, theme directory/detail, about,
+  sitemap, robots, and generic 404 routes render; search is trimmed and
+  bounded, and pagination has the required default and offset limit.
+- [x] Work — stable theme identities resolve via published lineage and only
+  active approved projections are selected; related content is shared-theme
+  ordered, excludes itself, and is capped at three.
+- [x] Work — variable data is escaped, article HTML is re-sanitized and
+  demotes fragment `h1`s, while canonical metadata, skip navigation,
+  landmarks, one page `h1`, and empty states are present.
+- [x] Automated acceptance criteria — PostgreSQL route tests cover every
+  declared page, escaped title, content rendering, empty/unknown/archived
+  absence, search and pagination bounds, sitemap scope, and theme absence.
+- [x] Automated acceptance criteria — rendered HTML tests assert semantic
+  main/skip structure, one `h1`, canonical metadata, and no reliance on
+  JavaScript for article content. PW-WP3b owns the external edge checks.
+
+### Completion evidence
+
+- `public_site/{schemas,service,rendering}.py` and
+  `api/routes/public_site.py` provide the internal, HTML-only renderer;
+  `api/main.py` mounts it at `/_site` without exposing it through nginx.
+- `test_internal_public_site_renders_only_active_approved_projections`
+  exercises every declared route, its public-only data boundary, escaping,
+  accessibility structure, bounds, sitemap, unknown route/theme handling, and
+  disappearance after archive.
+- `docs/architecture.md` documents the public-projection query boundary and
+  the deliberate PW-WP3b nginx separation. `PUBLIC_SITE_NAME` defaults to
+  “Evidence-led insights”.
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit
+  --exit-code-from tests` passed: 184 tests against PostgreSQL+pgvector.
+
+## PW-WP3b — Public-edge rewrites and 404s
+
+### Objective
+
+Expose only the declared server-rendered editorial routes through the public
+edge while keeping the internal renderer and every administrative/API route
+unavailable.
+
+### Work
+
+- Configure nginx to rewrite only `/`, `/insights`, `/insights/{slug}`,
+  `/themes`, `/themes/{id}-{slug}`, `/about`, `robots.txt`, and `sitemap.xml`
+  to `/_site`.
+- Return the renderer's generic public `404` for unknown paths through a named
+  internal handler. Direct `/_site`, admin, API, input, operations, form,
+  generation, and taxonomy paths remain unavailable at the edge.
+- Make the public edge wait for the internal API and extend the disposable
+  Compose topology so the built nginx image exercises live internal rendering.
+
+### Automated acceptance criteria
+
+- Built-container tests receive `200` for every declared public page plus
+  static health/assets, and `404` for unknown and direct internal/admin/API
+  paths, including `/_site/*`.
+- Static configuration checks prove only named public routes proxy internally;
+  no SPA fallback or broad direct internal route exists.
+
+### Completion checklist
+
+- [x] Objective — the public edge exposes only the declared editorial HTML
+  surface, with no direct internal renderer or dashboard/API access.
+- [x] Work — nginx has exact named public-route rewrites for all declared
+  paths and dynamic insight/theme detail patterns; static assets and health
+  retain their local handlers.
+- [x] Work — a named internal public-404 rewrite returns generic rendered 404
+  pages for every other path, including direct internal and admin/API routes.
+- [x] Work — `public-web` waits for a healthy API, while `compose.test.yaml`
+  initializes the disposable schema and starts API plus edge for HTTP testing.
+- [x] Automated acceptance criteria — built-container requests verify allowed
+  health, static, and declared public routes return `200`, and unknown,
+  internal, admin, API, input, operations, form, generation, and taxonomy
+  paths return `404`.
+- [x] Automated acceptance criteria — static route checks reject SPA fallback
+  and assert the named internal handler plus only the declared public routes.
+
+### Completion evidence
+
+- `frontend/public/nginx/default.conf` provides the allowlisted rewrites and
+  named `@public_not_found` handler; no route exposes `/_site` directly.
+- `compose.yaml` makes `public-web` depend on healthy `api`; the disposable
+  topology starts a fresh initialized API/database pair before nginx.
+- `tests.test_public_edge_isolation` exercises the built public container over
+  the Compose network and checks both allowlisted routes and denied families.
+- `docs/architecture.md` records the route allowlist and internal 404
+  boundary. `docker compose -f compose.test.yaml up --build
+  --abort-on-container-exit --exit-code-from tests` passed: 184 tests against
+  PostgreSQL+pgvector.
+
 ## PW-WP4 — Public interface and accessibility system
 
 ### Objective
@@ -1337,6 +1653,22 @@ navigation, browser API client code, or a client-side framework.
   320px, 768px, and 1280px fixtures.
 - The CI accessibility checker finds no serious landmark, heading, label,
   link-name, duplicate-ID, or contrast violation on any public route.
+
+### Completion checklist
+
+- [x] Objective — the public editorial library uses its own server-rendered interface and never imports admin UI code or a browser API client.
+- [x] Work — public-only CSS supplies forest/mint tokens, responsive layout, focus, header/footer, cards, prose, theme pills, forms, notices, and empty states.
+- [x] Work — homepage, library, article, theme, and about views provide the editorial-library information architecture with no feedback, analytics, cookies, embeds, remote fonts, or stock imagery.
+- [x] Work — semantic landmarks, skip link, heading hierarchy, visible focus, responsive 320px layout, and reduced-motion support are present.
+- [x] Automated acceptance criteria — asset contract checks reject admin paths, remote URLs, and browser fetch use while asserting responsive and accessibility CSS tokens.
+- [x] Automated acceptance criteria — HTML route coverage verifies main/skip/label/link-name/canonical/one-h1 structure and server-rendered content without JavaScript.
+
+### Completion evidence
+
+- `frontend/public/assets/site.css` is a dependency-free public stylesheet with responsive, focus, and reduced-motion rules.
+- `public_site/rendering.py` and `api/routes/public_site.py` render the public navigation, hero, library search, cards, theme links, article prose, and transparency copy using public paths.
+- `tests.test_public_edge_isolation.test_public_assets_are_self_contained_and_responsive` enforces the asset boundary; public HTML integration tests enforce the structural accessibility contract.
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from tests` passed with the full disposable PostgreSQL+pgvector and public-edge topology.
 
 ## PW-WP5 — Discovery, caching, and public security
 
@@ -1371,6 +1703,47 @@ minimal and predictable.
   and frame protections, with no stack trace or internal detail in `404`/`5xx`
   responses.
 
+### Completion checklist
+
+- [x] Objective — public pages are shareable and indexable while delivery is
+  constrained to a predictable public-only surface.
+- [x] Work — validated public-site configuration v1 supplies the configured
+  origin, name, and optional description; canonical, sitemap, Open Graph, and
+  JSON-LD URLs are derived from that origin only.
+- [x] Work — robots and sitemap include only allowlisted public pages, active
+  projection articles, and public themes; internal, API, and admin-looking
+  paths are disallowed.
+- [x] Work — constrained article JSON-LD and Open Graph metadata omit invented
+  people, images, ratings, statistics, and claims; HTML/discovery and unhashed
+  assets use a five-minute shared cache while content-hashed assets are
+  immutable.
+- [x] Work — the public edge sends a scriptless/self-host-only CSP, no
+  third-party connections, nosniff, restrictive referrer/permissions policies,
+  frame denial, and generic no-detail public 404 responses.
+- [x] Automated acceptance criteria — settings tests reject malformed origins
+  and a hostile Host header cannot change canonical output.
+- [x] Automated acceptance criteria — PostgreSQL/edge tests prove sitemap and
+  robots exclude internal/inactive content and every sitemap route is served
+  through the public edge.
+- [x] Automated acceptance criteria — HTTP/static tests assert CSP, cache,
+  nosniff, referrer, permissions, frame protections, and generic 404 output
+  without internal routing detail.
+
+### Completion evidence
+
+- `public_site/settings.py` implements public-site configuration v1 and
+  `rendering.py` derives canonical/Open Graph/JSON-LD output exclusively from
+  its validated configured origin.
+- `api/routes/public_site.py` emits restricted robots and a projection-only
+  sitemap. `frontend/public/nginx` applies the public CSP, browser protections,
+  short cache policy, and immutable cache rule only for content-hashed assets.
+- `test_public_site_settings` and the live `test_public_edge_isolation` check
+  malformed settings, hostile Host canonical isolation, metadata/cache/header
+  contracts, discovery routes, and generic edge 404 responses.
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit
+  --exit-code-from tests` passed: 187 tests against PostgreSQL+pgvector and the
+  built public nginx edge.
+
 ## PW-WP6 — Public end-to-end verification and operations
 
 ### Objective
@@ -1400,6 +1773,44 @@ batch-taxonomy changes, then document how to operate it.
   remain correct through every tested transition.
 - The documentation review confirms the current reference docs describe the
   batch-only public deployment; no second work-package document is created.
+
+### Completion checklist
+
+- [x] Objective — public lifecycle and batch-taxonomy boundaries are proven
+  and their operations are documented.
+- [x] Work — the built Compose fixture covers no publications, approval,
+  reapproval, return-to-draft, archive withdrawal, stable URLs, and edge
+  isolation; it also covers batch rename, split, merge, retirement,
+  publication, and rollback without rewriting article snapshots.
+- [x] Work — complete-backup restore verification compares public projections
+  and revision-scoped theme snapshots alongside batch runs and archive data.
+- [x] Work — architecture, API, operations, root, and public frontend docs
+  describe topology, routes, settings, caching, restores, lifecycle, and
+  immutable taxonomy snapshots.
+- [x] Automated acceptance criteria — clean Compose builds and starts a
+  no-publications public stack with no internal route exposed.
+- [x] Automated acceptance criteria — lifecycle and batch-taxonomy fixtures
+  preserve public selection and immutable snapshots through tested changes.
+- [x] Automated acceptance criteria — documentation review confirms this is
+  the sole current work-package document and describes batch-only deployment.
+
+### Completion evidence
+
+- `test_public_site_e2e` exercises the built `public-web` edge against
+  PostgreSQL: no-publications launch, approval, return-to-draft withdrawal,
+  reapproval with a stable slug, archive withdrawal, immutable prior theme
+  snapshot, blocked internal/API paths, successor rename/split/merge/retired
+  theme lineage, publication, and rollback.
+- `verify-legacy-archive-restore.sh` now compares `article_publications` and
+  `article_publication_themes` counts with batch runs, archive manifest, and
+  archived rollout records after an isolated complete restore.
+- `README.md`, `docs/architecture.md`, `docs/api.md`, `docs/operations.md`,
+  and `frontend/public/README.md` document the public topology, configuration,
+  cache/security behaviour, restore process, withdrawal/reapproval, and
+  immutable batch-theme snapshots.
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit
+  --exit-code-from tests` passed: 189 tests against PostgreSQL+pgvector, the
+  built API, and the public nginx edge.
 
 ## Public-website explicit non-goals
 

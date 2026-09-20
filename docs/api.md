@@ -51,6 +51,12 @@ template and canonical evidence, validates returned citations/tags against that
 scope, and persists provenance transactionally. Template HTML is versioned and
 sanitized; only the documented placeholder set is permitted.
 
+Approval refreshes the internal `article_publications` projection used by the
+public edge. Returning an approved article to draft or archiving it withdraws
+it; reapproval keeps its permanent slug while selecting a new immutable
+revision snapshot. Public snapshots retain their batch-theme display values
+through taxonomy rename, split, merge, retirement, publication, and rollback.
+
 ## Operations and candidate taxonomy
 
 - All `/operations/*` and `/taxonomy-runs/*` routes require `Authorization:

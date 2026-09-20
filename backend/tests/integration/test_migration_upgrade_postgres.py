@@ -174,6 +174,122 @@ class MigrationUpgradePostgresTests(unittest.IsolatedAsyncioTestCase):
         await self.connection.executemany("INSERT INTO schema_migrations(filename) VALUES($1)", [(name,) for name in names])
         self.assertEqual(await self.connection.fetchval("SELECT count(*) FROM schema_migrations"), len(names))
         self.assertTrue(await self.connection.fetchval("SELECT to_regprocedure('publish_taxonomy_run(bigint,timestamptz,text,text)') IS NOT NULL"))
+        self.assertTrue(await self.connection.fetchval("SELECT to_regclass('article_publications') IS NOT NULL"))
+        self.assertTrue(await self.connection.fetchval("SELECT to_regclass('article_publication_themes') IS NOT NULL"))
+
+    async def test_publication_projection_backfills_only_approved_batch_articles(self):
+        """038 is safe for a populated batch-only upgrade and never copies legacy tags."""
+        await self.connection.execute(legacy_base_sql())
+        await self.apply_from(13, 37)
+        run_id = await self.connection.fetchval("""
+            INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,configuration,configuration_sha256,
+              embedding_model,embedding_representation,embedding_dimension,clustering_model,topic_model,theme_model,topic_prompt_version,theme_prompt_version)
+            VALUES(CURRENT_TIMESTAMP,repeat('a',64),'{}'::jsonb,repeat('b',64),'fixture','fixture',2,'fixture','fixture','fixture','fixture','fixture') RETURNING id
+        """)
+        topic_id = await self.connection.fetchval("INSERT INTO topics DEFAULT VALUES RETURNING id")
+        topic_revision_id = await self.connection.fetchval("""
+            INSERT INTO topic_revisions(taxonomy_run_id,topic_id,cluster_key,name,normalized_name,literal_description,support_count,continuity_decision)
+            VALUES($1,$2,'fixture','Fixture','fixture','fixture',1,'new') RETURNING id
+        """, run_id, topic_id)
+        await self.connection.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1", run_id)
+        candidate_theme_id = await self.connection.fetchval("""
+            INSERT INTO taxonomy_candidate_themes(taxonomy_run_id,name,description,rationale,inference_request,inference_response)
+            VALUES($1,'Fixture theme','fixture','fixture','{}','{}') RETURNING id
+        """, run_id)
+        await self.connection.execute(
+            "INSERT INTO taxonomy_candidate_theme_topics VALUES($1,$2,$3,TRUE)",
+            run_id, candidate_theme_id, topic_revision_id,
+        )
+        reconciled_theme_id = await self.connection.fetchval("""
+            INSERT INTO taxonomy_reconciled_themes(taxonomy_run_id,canonical_candidate_theme_id,normalized_name,topic_set_sha256)
+            VALUES($1,$2,'fixture theme',repeat('d',64)) RETURNING id
+        """, run_id, candidate_theme_id)
+        await self.connection.execute(
+            "INSERT INTO taxonomy_reconciled_theme_antecedents VALUES($1,$2,$3,'canonical')",
+            run_id, reconciled_theme_id, candidate_theme_id,
+        )
+        await self.connection.execute("UPDATE taxonomy_runs SET status='ready_for_review',completed_at=CURRENT_TIMESTAMP WHERE id=$1", run_id)
+        await self.connection.execute("SELECT materialize_taxonomy_theme_revisions($1)", run_id)
+        await self.connection.execute("UPDATE taxonomy_runs SET status='published',decision_by='fixture',decision_at=CURRENT_TIMESTAMP,published_at=CURRENT_TIMESTAMP WHERE id=$1", run_id)
+        stable_theme_id = await self.connection.fetchval(
+            "SELECT theme_id FROM theme_revisions WHERE taxonomy_run_id=$1", run_id
+        )
+
+        async with self.connection.transaction():
+            approved_article_id = await self.connection.fetchval(
+                "INSERT INTO articles(title,status,approved_at) VALUES('A Title','approved',CURRENT_TIMESTAMP) RETURNING id"
+            )
+            approved_revision_id = await self.connection.fetchval("""
+                INSERT INTO article_revisions(article_id,revision_number,title,structured_content,rendered_html)
+                VALUES($1,1,'A Title','{}'::jsonb,'<p>safe</p>') RETURNING id
+            """, approved_article_id)
+            await self.connection.execute(
+                "UPDATE articles SET current_revision_id=$2 WHERE id=$1", approved_article_id, approved_revision_id
+            )
+            await self.connection.execute(
+                "INSERT INTO article_themes(article_id,stable_theme_id,theme_name_snapshot) VALUES($1,$2,'Fixture theme')",
+                approved_article_id, stable_theme_id,
+            )
+            await self.connection.execute("INSERT INTO articles(title) VALUES('Draft article')")
+            legacy_only_article_id = await self.connection.fetchval(
+                "INSERT INTO articles(title,status,approved_at) VALUES('Legacy-only article','approved',CURRENT_TIMESTAMP) RETURNING id"
+            )
+            legacy_only_revision_id = await self.connection.fetchval("""
+                INSERT INTO article_revisions(article_id,revision_number,title,structured_content,rendered_html)
+                VALUES($1,1,'Legacy-only article','{}'::jsonb,'<p>private</p>') RETURNING id
+            """, legacy_only_article_id)
+            await self.connection.execute(
+                "UPDATE articles SET current_revision_id=$2 WHERE id=$1", legacy_only_article_id, legacy_only_revision_id
+            )
+            await self.connection.execute(
+                "INSERT INTO article_themes(article_id,theme_name_snapshot) VALUES($1,'Legacy theme')",
+                legacy_only_article_id,
+            )
+
+        await self.apply_from(38, 38)
+        publication = await self.connection.fetchrow("""
+            SELECT article_id,approved_revision_id,slug,first_published_at,updated_at
+            FROM article_publications
+        """)
+        self.assertEqual((publication["article_id"], publication["approved_revision_id"], publication["slug"]),
+                         (approved_article_id, approved_revision_id, f"a-title-{approved_article_id}"))
+        self.assertIsNotNone(publication["first_published_at"])
+        self.assertIsNotNone(publication["updated_at"])
+        theme_snapshots = await self.connection.fetch("""
+            SELECT stable_theme_id,display_name FROM article_publication_themes
+            WHERE article_id=$1 AND approved_revision_id=$2
+        """, approved_article_id, approved_revision_id)
+        self.assertEqual(
+            [(row["stable_theme_id"], row["display_name"]) for row in theme_snapshots],
+            [(stable_theme_id, "Fixture theme")],
+        )
+        self.assertEqual(await self.connection.fetchval("SELECT count(*) FROM article_publications"), 1)
+        self.assertIsNone(await self.connection.fetchval(
+            "SELECT article_id FROM article_publications WHERE article_id=$1", legacy_only_article_id
+        ))
+        with self.assertRaises(asyncpg.ForeignKeyViolationError):
+            await self.connection.execute("""
+                INSERT INTO article_publications(article_id,approved_revision_id,slug,first_published_at,updated_at)
+                VALUES($1,$2,'wrong-revision',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+            """, legacy_only_article_id, approved_revision_id)
+        with self.assertRaises(asyncpg.UniqueViolationError):
+            await self.connection.execute("""
+                INSERT INTO article_publications(article_id,approved_revision_id,slug,first_published_at,updated_at)
+                VALUES($1,$2,$3,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+            """, legacy_only_article_id, legacy_only_revision_id, publication["slug"])
+        orphan_theme_id = await self.connection.fetchval(
+            "INSERT INTO theme_identities(created_in_run_id) VALUES($1) RETURNING id", run_id
+        )
+        with self.assertRaisesRegex(asyncpg.PostgresError, "batch theme identity"):
+            await self.connection.execute("""
+                INSERT INTO article_publication_themes(article_id,approved_revision_id,stable_theme_id,display_name)
+                VALUES($1,$2,$3,'invalid')
+            """, approved_article_id, approved_revision_id, orphan_theme_id)
+        with self.assertRaisesRegex(asyncpg.PostgresError, "immutable"):
+            await self.connection.execute("""
+                UPDATE article_publication_themes SET display_name='mutated'
+                WHERE article_id=$1 AND approved_revision_id=$2 AND stable_theme_id=$3
+            """, approved_article_id, approved_revision_id, stable_theme_id)
 
     async def test_migrations_are_independently_transactional_and_linted(self):
         for path in sorted((ROOT / "migrations").glob("*.sql")):

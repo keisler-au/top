@@ -571,10 +571,96 @@ async def _transition(
         payload.actor,
         payload.note,
     )
+    if to_status == "approved":
+        await _refresh_article_publication(
+            connection,
+            article_id=article_id,
+            approved_revision_id=row["current_revision_id"],
+        )
     response = await _article_response(connection, article_id)
     if response is None:  # pragma: no cover
         raise RuntimeError("transitioned article disappeared")
     return response
+
+
+async def _refresh_article_publication(
+    connection: asyncpg.Connection,
+    *,
+    article_id: int,
+    approved_revision_id: int,
+) -> None:
+    """Atomically point the projection at an approved immutable revision.
+
+    Theme snapshots are append-only by revision.  Reapproval therefore changes
+    the active projection row without rewriting the prior public snapshot.
+    """
+    article = await connection.fetchrow(
+        """
+        SELECT articles.approved_at, articles.updated_at, revisions.title
+        FROM articles
+        JOIN article_revisions AS revisions ON revisions.id = articles.current_revision_id
+        WHERE articles.id = $1
+          AND articles.status = 'approved'
+          AND articles.current_revision_id = $2
+        """,
+        article_id,
+        approved_revision_id,
+    )
+    if article is None:  # guarded by the locked transition, retained for safety
+        raise ValueError("approved article projection is unavailable")
+    legacy_theme = await connection.fetchval(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM article_themes
+            WHERE article_id = $1 AND stable_theme_id IS NULL
+        )
+        """,
+        article_id,
+    )
+    if legacy_theme:
+        raise ValueError("article theme is outside the batch taxonomy")
+    await connection.execute(
+        """
+        INSERT INTO article_publications (
+            article_id, approved_revision_id, slug, first_published_at, updated_at
+        ) VALUES ($1, $2, public_article_slug($3, $1), $4, $5)
+        ON CONFLICT (article_id) DO UPDATE
+        SET approved_revision_id = EXCLUDED.approved_revision_id,
+            updated_at = EXCLUDED.updated_at
+        """,
+        article_id,
+        approved_revision_id,
+        article["title"],
+        article["approved_at"],
+        article["updated_at"],
+    )
+    themes = await connection.fetch(
+        """
+        SELECT stable_theme_id, theme_name_snapshot
+        FROM article_themes
+        WHERE article_id = $1 AND stable_theme_id IS NOT NULL
+        ORDER BY stable_theme_id
+        """,
+        article_id,
+    )
+    if themes:
+        await connection.executemany(
+            """
+            INSERT INTO article_publication_themes (
+                article_id, approved_revision_id, stable_theme_id, display_name
+            ) VALUES ($1, $2, $3, $4)
+            ON CONFLICT DO NOTHING
+            """,
+            [
+                (
+                    article_id,
+                    approved_revision_id,
+                    theme["stable_theme_id"],
+                    theme["theme_name_snapshot"],
+                )
+                for theme in themes
+            ],
+        )
 
 
 async def _run_transition(

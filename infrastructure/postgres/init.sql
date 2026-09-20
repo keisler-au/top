@@ -473,6 +473,7 @@ EXECUTE FUNCTION enqueue_original_input_job();
 \ir migrations/035_fix_superseded_publication_consistency.sql
 \ir migrations/036_remove_legacy_taxonomy_runtime.sql
 \ir migrations/037_drop_legacy_taxonomy_schema.sql
+\ir migrations/038_add_article_publications.sql
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
     filename TEXT PRIMARY KEY,
@@ -517,4 +518,5 @@ VALUES
     ,('035_fix_superseded_publication_consistency.sql')
     ,('036_remove_legacy_taxonomy_runtime.sql')
     ,('037_drop_legacy_taxonomy_schema.sql')
+    ,('038_add_article_publications.sql')
 ON CONFLICT DO NOTHING;

@@ -9,7 +9,7 @@ import asyncpg
 from fastapi import FastAPI
 import httpx
 
-from triage_processor.api.routes import articles, dashboard, generation, form_sources, inputs, operations, taxonomy_review
+from triage_processor.api.routes import articles, dashboard, generation, form_sources, inputs, operations, taxonomy_review, public_site
 from triage_processor.articles import canonical_theme_ids
 from triage_processor.taxonomy_snapshots import SnapshotRequest, create_taxonomy_snapshot
 from triage_processor.taxonomy_stage_quality import (
@@ -66,7 +66,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         )
         self.addAsyncCleanup(self.pool.close)
         self.app = FastAPI()
-        for router in (articles.router, dashboard.router, generation.router, form_sources.router, inputs.router, operations.router, taxonomy_review.router):
+        for router in (articles.router, dashboard.router, generation.router, form_sources.router, inputs.router, operations.router, taxonomy_review.router, public_site.router):
             self.app.include_router(router)
         self.app.state.db_pool = self.pool
         self.client = httpx.AsyncClient(
@@ -356,6 +356,116 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((item['article_count'], item['approved_article_count'], item['coverage_state']), (2, 0, 'uncovered'))
         await self.transition(draft, 'approve', 409)
 
+    async def test_approval_projection_is_atomic_and_reapproval_preserves_history(self):
+        draft = await self.create_article(title="First public title", themes=[1])
+        self.assertEqual(
+            await self.admin.fetchval("SELECT count(*) FROM article_publications WHERE article_id=$1", draft["id"]),
+            0,
+        )
+        review = await self.create_article(title="Review only")
+        await self.transition(review, "submit")
+        archived = await self.create_article(title="Archived only")
+        await self.transition(archived, "archive")
+        self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM article_publications"), 0)
+
+        await self.transition(draft, "submit")
+        approved = await self.transition(draft, "approve")
+        first = await self.admin.fetchrow("""
+            SELECT approved_revision_id, slug, first_published_at, updated_at
+            FROM article_publications WHERE article_id=$1
+        """, draft["id"])
+        self.assertEqual(first["approved_revision_id"], approved["current_revision"]["id"])
+        self.assertEqual(first["slug"], f"first-public-title-{draft['id']}")
+        self.assertEqual(
+            [(row["stable_theme_id"], row["display_name"]) for row in await self.admin.fetch("""
+                SELECT stable_theme_id, display_name FROM article_publication_themes
+                WHERE article_id=$1 AND approved_revision_id=$2
+            """, draft["id"], first["approved_revision_id"])],
+            [(1, "Alpha")],
+        )
+
+        await self.transition(approved, "return-to-draft")
+        revised = await self.client.patch(f"/articles/{draft['id']}", json={
+            "title": "Revised public title",
+            "theme_ids": [2],
+            "expected_revision_id": approved["current_revision"]["id"],
+        })
+        self.assertEqual(revised.status_code, 200, revised.text)
+        await self.transition(revised.json(), "submit")
+        reapproved = await self.transition(revised.json(), "approve")
+        current = await self.admin.fetchrow("""
+            SELECT approved_revision_id, slug, first_published_at, updated_at
+            FROM article_publications WHERE article_id=$1
+        """, draft["id"])
+        self.assertEqual(current["approved_revision_id"], reapproved["current_revision"]["id"])
+        self.assertNotEqual(current["approved_revision_id"], first["approved_revision_id"])
+        self.assertEqual(current["slug"], first["slug"])
+        self.assertEqual(current["first_published_at"], first["first_published_at"])
+        self.assertGreaterEqual(current["updated_at"], first["updated_at"])
+        snapshots = await self.admin.fetch("""
+            SELECT approved_revision_id, stable_theme_id, display_name
+            FROM article_publication_themes WHERE article_id=$1
+            ORDER BY approved_revision_id, stable_theme_id
+        """, draft["id"])
+        self.assertEqual(
+            [(row["approved_revision_id"], row["stable_theme_id"], row["display_name"]) for row in snapshots],
+            [
+                (first["approved_revision_id"], 1, "Alpha"),
+                (current["approved_revision_id"], 2, "Beta"),
+            ],
+        )
+
+    async def test_approval_projection_failure_rolls_back_the_transition(self):
+        article = await self.create_article()
+        await self.transition(article, "submit")
+        await self.admin.execute("""
+            CREATE FUNCTION fail_publication_snapshot() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'test publication snapshot failure'; END $$;
+            CREATE TRIGGER fail_publication_snapshot
+            BEFORE INSERT ON article_publication_themes
+            FOR EACH ROW EXECUTE FUNCTION fail_publication_snapshot();
+        """)
+        with self.assertRaises(asyncpg.RaiseError):
+            await self.transition(article, "approve")
+        row = await self.get(f"/articles/{article['id']}")
+        self.assertEqual(row["status"], "ready_for_review")
+        self.assertIsNone(row["approved_at"])
+        self.assertEqual(
+            await self.admin.fetchval("SELECT count(*) FROM article_publications WHERE article_id=$1", article["id"]),
+            0,
+        )
+        self.assertEqual(
+            await self.admin.fetchval("SELECT count(*) FROM article_audit WHERE article_id=$1 AND action='approved'", article["id"]),
+            0,
+        )
+
+    async def test_internal_public_site_renders_only_active_approved_projections(self):
+        article = await self.create_article(title="Public <title>", themes=[1, 2])
+        await self.transition(article, "submit")
+        approved = await self.transition(article, "approve")
+        slug = f"public-title-{article['id']}"
+        for path in ("/_site/", "/_site/insights", "/_site/themes", "/_site/about", "/_site/robots.txt", "/_site/sitemap.xml", f"/_site/insights/{slug}", "/_site/themes/1-alpha"):
+            response = await self.client.get(path)
+            self.assertEqual(response.status_code, 200, (path, response.text))
+        detail = (await self.client.get(f"/_site/insights/{slug}")).text
+        self.assertIn("<main", detail)
+        self.assertIn('href="#main"', detail)
+        self.assertEqual(detail.count("<h1>"), 1)
+        self.assertIn("Public &lt;title&gt;", detail)
+        self.assertNotIn("original_input_id", detail)
+        self.assertNotIn("submission_key", detail)
+        self.assertIn('rel="canonical"', detail)
+        self.assertIn("Evidence", detail)
+        sitemap = (await self.client.get("/_site/sitemap.xml")).text
+        self.assertIn(f"/insights/{slug}", sitemap)
+        self.assertNotIn("/_site/", sitemap)
+        self.assertEqual((await self.client.get("/_site/insights?x=" + "a" * 121)).status_code, 404)
+        self.assertEqual((await self.client.get("/_site/insights?page=1000")).status_code, 404)
+        self.assertEqual((await self.client.get("/_site/themes/999-unknown")).status_code, 404)
+        self.assertEqual((await self.client.get("/_site/not-a-route")).status_code, 404)
+        await self.transition(approved, "archive")
+        self.assertEqual((await self.client.get(f"/_site/insights/{slug}")).status_code, 404)
+
     async def test_stable_pagination_and_recommendation_ties(self):
         for strategy in ['least-covered', 'most-evidence']:
             rows = (await self.get(f'/recommendations/articles?type=theme&strategy={strategy}'))['items']
@@ -409,6 +519,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row['status'], 'ready_for_review')
         self.assertIsNone(row['approved_at'])
         self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM article_audit WHERE action='approved'"), 0)
+        self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM article_publications WHERE article_id=$1", article["id"]), 0)
 
     async def test_database_constraints_and_required_indexes(self):
         article = await self.create_article()
