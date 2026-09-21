@@ -41,12 +41,13 @@ class QualityFacts:
         }
 
 
-THRESHOLD_VERSION = "taxonomy-release-gate-v1"
+THRESHOLD_VERSION = "taxonomy-release-gate-v2"
 THRESHOLDS = {
     "minimum_snapshot_completeness": 1.0,
     "maximum_noise_rate": 0.4,
     "minimum_topic_acceptance_rate": 0.8,
     "maximum_duplicate_topic_rate": 0.1,
+    "minimum_reconciled_theme_count": 1,
 }
 
 
@@ -60,6 +61,8 @@ def evaluate_computed_gate(metrics: dict[str, int | float]) -> tuple[bool, tuple
         failures.append("topic_acceptance_rate_low")
     if metrics["duplicate_topic_rate"] > THRESHOLDS["maximum_duplicate_topic_rate"]:
         failures.append("duplicate_topic_rate_exceeded")
+    if metrics["reconciled_theme_count"] < THRESHOLDS["minimum_reconciled_theme_count"]:
+        failures.append("reconciled_themes_missing")
     return not failures, tuple(failures)
 
 
@@ -89,7 +92,7 @@ async def compute_run_quality(
                     (SELECT count(*) FROM taxonomy_cluster_memberships WHERE taxonomy_run_id = $1 AND decision = 'noise')::int AS noise_count,
                     (SELECT count(*) FROM taxonomy_topic_naming_attempts WHERE taxonomy_run_id = $1)::int AS naming_attempt_count,
                     (SELECT count(*) FROM taxonomy_topic_naming_attempts WHERE taxonomy_run_id = $1 AND accepted)::int AS accepted_topic_count,
-                    (SELECT count(*) FROM taxonomy_topic_naming_attempts WHERE taxonomy_run_id = $1 AND validation_errors @> ARRAY['duplicate_topic'])::int AS duplicate_topic_count,
+                    (SELECT count(*) FROM taxonomy_topic_naming_attempts WHERE taxonomy_run_id = $1 AND (validation_errors @> ARRAY['duplicate_topic'] OR validation_errors @> ARRAY['normalized name duplicates another candidate topic in this run']))::int AS duplicate_topic_count,
                     (SELECT count(*) FROM taxonomy_candidate_themes WHERE taxonomy_run_id = $1)::int AS candidate_theme_count,
                     (SELECT count(*) FROM taxonomy_reconciled_themes WHERE taxonomy_run_id = $1)::int AS reconciled_theme_count
                 """, run_id,

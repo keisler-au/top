@@ -57,6 +57,18 @@ test("normalizes API problem responses", async () => {
     userFacingError(new ApiError(503, null, "Unavailable")),
     "The server could not complete the request. Please try again.",
   );
+  assert.match(
+    userFacingError(new ApiError(503, { detail: { code: "taxonomy_first_run" } }, "Unavailable")),
+    /No taxonomy has been published/,
+  );
+  assert.match(
+    userFacingError(new ApiError(503, { detail: { code: "taxonomy_candidate_failed" } }, "Unavailable")),
+    /inspect the failed stage/ ,
+  );
+  assert.match(
+    userFacingError(new ApiError(503, { detail: { code: "taxonomy_quality_blocked" } }, "Unavailable")),
+    /quality gate/,
+  );
 });
 
 test("creates and toggles form sources with JSON requests", async () => {

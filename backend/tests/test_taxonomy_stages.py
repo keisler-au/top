@@ -45,6 +45,9 @@ class FakeConnection:
         self.fetchval_calls.append((query, values))
         return self.value
 
+    async def execute(self, query, *values):
+        return None
+
     def transaction(self):
         return AsyncContext(self)
 
@@ -151,7 +154,7 @@ class TaxonomyStageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, "pending")
         failure_query, failure_values = failed_connection.fetchval_calls[0]
         self.assertIn("lease_expires_at >= CURRENT_TIMESTAMP", failure_query)
-        self.assertEqual(failure_values, (4, "worker-a", "pending", "valueerror", 10))
+        self.assertEqual(failure_values, (4, "worker-a", "pending", "valueerror", 10, 2))
 
     def test_failure_categories_and_backoff_are_bounded(self):
         self.assertEqual(bounded_error_class(RuntimeError()), "runtimeerror")
@@ -171,6 +174,7 @@ class TaxonomyStageTests(unittest.IsolatedAsyncioTestCase):
         retry_query, retry_values = retry_connection.fetchval_calls[0]
         self.assertIn("status = 'failed'", retry_query)
         self.assertEqual(retry_values, (4,))
+        self.assertIn("enqueue_taxonomy_run", retry_connection.fetchrow_calls[0][0])
 
         cancel_connection = FakeConnection(value=4)
         self.assertTrue(await cancel_stage(FakePool(cancel_connection), 4))

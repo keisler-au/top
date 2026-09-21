@@ -275,10 +275,10 @@ async def renew_stage(
             SET lease_expires_at = CURRENT_TIMESTAMP + ($3 * INTERVAL '1 second'),
                 heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
             WHERE id = $1 AND status = 'running' AND lease_owner = $2
-              AND lease_expires_at >= CURRENT_TIMESTAMP
+              AND lease_expires_at >= CURRENT_TIMESTAMP AND attempt = $4
             RETURNING id
             """,
-            stage.id, stage.lease_owner, lease_seconds,
+            stage.id, stage.lease_owner, lease_seconds, stage.attempt,
         )
     return identifier is not None
 
@@ -287,13 +287,13 @@ async def require_stage_lease(connection: asyncpg.Connection, stage: ClaimedStag
     """Refuse candidate writes after a worker has lost its stage lease."""
     owned = await connection.fetchval(
         """
-        SELECT EXISTS (
-            SELECT 1 FROM taxonomy_run_stages
+        SELECT id FROM taxonomy_run_stages
             WHERE id = $1 AND taxonomy_run_id = $2 AND status = 'running'
               AND lease_owner = $3 AND lease_expires_at >= CURRENT_TIMESTAMP
-        )
+              AND attempt = $4
+        FOR UPDATE
         """,
-        stage.id, stage.run_id, stage.lease_owner,
+        stage.id, stage.run_id, stage.lease_owner, stage.attempt,
     )
     if not owned:
         raise RuntimeError("taxonomy stage lease is no longer owned")
@@ -312,10 +312,10 @@ async def complete_stage(
                 heartbeat_at = NULL, completed_at = CURRENT_TIMESTAMP,
                 stage_output_sha256 = $3, updated_at = CURRENT_TIMESTAMP
             WHERE id = $1 AND status = 'running' AND lease_owner = $2
-              AND lease_expires_at >= CURRENT_TIMESTAMP
+              AND lease_expires_at >= CURRENT_TIMESTAMP AND attempt = $4
             RETURNING id
             """,
-            stage.id, stage.lease_owner, output_hash,
+            stage.id, stage.lease_owner, output_hash, stage.attempt,
         )
     return identifier is not None
 
@@ -330,11 +330,11 @@ async def complete_ready_for_review_stage(
     async with pool.acquire() as connection:
         async with connection.transaction():
             has_quality = await connection.fetchval(
-                "SELECT EXISTS (SELECT 1 FROM taxonomy_quality_snapshots WHERE taxonomy_run_id=$1)",
+                "SELECT EXISTS (SELECT 1 FROM taxonomy_release_attestations WHERE taxonomy_run_id=$1)",
                 stage.run_id,
             )
             if not has_quality:
-                raise ValueError("taxonomy run has no computed quality snapshot")
+                raise ValueError("taxonomy run has no computed release attestation")
             identifier = await connection.fetchval(
                 """
                 UPDATE taxonomy_run_stages
@@ -343,10 +343,10 @@ async def complete_ready_for_review_stage(
                     stage_output_sha256 = $3, updated_at = CURRENT_TIMESTAMP
                 WHERE id = $1 AND taxonomy_run_id = $4 AND stage = 'ready_for_publication'
                   AND status = 'running' AND lease_owner = $2
-                  AND lease_expires_at >= CURRENT_TIMESTAMP
+                  AND lease_expires_at >= CURRENT_TIMESTAMP AND attempt = $5
                 RETURNING id
                 """,
-                stage.id, stage.lease_owner, output_hash, stage.run_id,
+                stage.id, stage.lease_owner, output_hash, stage.run_id, stage.attempt,
             )
             if identifier is None:
                 return False
@@ -386,50 +386,67 @@ async def fail_stage(
         stage.attempt, base_seconds=retry_base_seconds, max_seconds=retry_max_seconds
     )
     async with pool.acquire() as connection:
-        return await connection.fetchval(
-            """
-            UPDATE taxonomy_run_stages
-            SET status = $3, lease_owner = NULL, lease_expires_at = NULL,
-                heartbeat_at = NULL,
-                error_class = CASE WHEN $3 = 'failed' THEN $4 ELSE NULL END,
-                available_at = CASE WHEN $3 = 'pending' THEN
-                    CURRENT_TIMESTAMP + ($5 * INTERVAL '1 second')
-                    ELSE available_at END,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1 AND status = 'running' AND lease_owner = $2
-              AND lease_expires_at >= CURRENT_TIMESTAMP
-            RETURNING status
-            """,
-            stage.id, stage.lease_owner, next_status, bounded_error_class(error), delay,
-        )
+        async with connection.transaction():
+            result = await connection.fetchval(
+                """
+                UPDATE taxonomy_run_stages
+                SET status = $3, lease_owner = NULL, lease_expires_at = NULL,
+                    heartbeat_at = NULL,
+                    error_class = CASE WHEN $3 = 'failed' THEN $4 ELSE NULL END,
+                    available_at = CASE WHEN $3 = 'pending' THEN
+                        CURRENT_TIMESTAMP + ($5 * INTERVAL '1 second')
+                        ELSE available_at END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1 AND status = 'running' AND lease_owner = $2
+                  AND lease_expires_at >= CURRENT_TIMESTAMP AND attempt = $6
+                RETURNING status
+                """,
+                stage.id, stage.lease_owner, next_status, bounded_error_class(error), delay, stage.attempt,
+            )
+            if result == "failed":
+                await _finish_failed_run(connection, stage.run_id, bounded_error_class(error))
+            return result
+
+
+async def _finish_failed_run(connection: asyncpg.Connection, run_id: int, code: str, *, cancelled: bool = False) -> None:
+    await connection.execute(
+        "UPDATE taxonomy_runs SET status='failed', error_summary=$2 WHERE id=$1 AND status IN ('pending','running','failed')",
+        run_id, code,
+    )
+    await connection.execute(
+        """UPDATE taxonomy_run_jobs SET status=$2, locked_at=NULL, locked_by=NULL,
+               last_error=$3, updated_at=CURRENT_TIMESTAMP
+           WHERE taxonomy_run_id=$1 AND status IN ('pending','processing','failed')""",
+        run_id, "cancelled" if cancelled else "failed", code,
+    )
 
 
 async def retry_stage(pool: asyncpg.Pool, stage_id: int) -> bool:
-    """Make a terminal failed stage eligible for another explicit attempt."""
+    """Explicitly retry a failed stage and reacquire its run's queue slot."""
     async with pool.acquire() as connection:
-        identifier = await connection.fetchval(
-            """
-            UPDATE taxonomy_run_stages
-            SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL,
-                heartbeat_at = NULL, error_class = NULL, available_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1 AND status = 'failed'
-            RETURNING id
-            """, stage_id,
-        )
-    return identifier is not None
+        async with connection.transaction():
+            run_id = await connection.fetchval(
+                "SELECT taxonomy_run_id FROM taxonomy_run_stages WHERE id=$1 AND status = 'failed' FOR UPDATE",
+                stage_id,
+            )
+            if run_id is None:
+                return False
+            await connection.fetchrow("SELECT * FROM enqueue_taxonomy_run($1)", run_id)
+    return True
 
 
 async def cancel_stage(pool: asyncpg.Pool, stage_id: int) -> bool:
-    """Cancel a not-yet-completed stage without changing immutable output."""
+    """Cancel the candidate's remaining work and release its singleton slot."""
     async with pool.acquire() as connection:
-        identifier = await connection.fetchval(
-            """
-            UPDATE taxonomy_run_stages
-            SET status = 'cancelled', lease_owner = NULL, lease_expires_at = NULL,
-                heartbeat_at = NULL, error_class = NULL, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1 AND status IN ('pending', 'running', 'failed')
-            RETURNING id
-            """, stage_id,
-        )
-    return identifier is not None
+        async with connection.transaction():
+            run_id = await connection.fetchval(
+                """UPDATE taxonomy_run_stages
+                   SET status='cancelled', lease_owner=NULL, lease_expires_at=NULL,
+                       heartbeat_at=NULL, error_class=NULL, updated_at=CURRENT_TIMESTAMP
+                   WHERE id=$1 AND status IN ('pending', 'running', 'failed')
+                   RETURNING taxonomy_run_id""", stage_id,
+            )
+            if run_id is None:
+                return False
+            await _finish_failed_run(connection, run_id, "candidate_cancelled", cancelled=True)
+    return True

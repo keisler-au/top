@@ -71,6 +71,10 @@ class StubDashboardConnection:
         self.calls.append((query, args))
         if "SELECT EXISTS (SELECT 1 FROM taxonomy_runs" in query:
             return self.published
+        if "taxonomy_run_stages stage" in query:
+            return False
+        if "taxonomy_release_attestations gate" in query:
+            return False
         if "dashboard:taxonomy-count" in query:
             return len(self.taxonomy_rows)
         if "dashboard:evidence-count" in query:
@@ -254,7 +258,7 @@ class DashboardApiTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(path=path):
                 response = await self.client.get(path)
                 self.assertEqual(response.status_code, 503)
-                self.assertEqual(response.json()["detail"]["code"], "taxonomy_unavailable")
+                self.assertEqual(response.json()["detail"]["code"], "taxonomy_first_run")
 
 
 class DashboardQueryContractTests(unittest.TestCase):

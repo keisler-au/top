@@ -79,9 +79,26 @@ async def _require_published_taxonomy(connection: Any) -> None:
         "SELECT EXISTS (SELECT 1 FROM taxonomy_runs WHERE status = 'published')"
     )
     if not available:
+        blocked = await connection.fetchval(
+            """SELECT EXISTS (
+                SELECT 1 FROM taxonomy_release_attestations gate
+                JOIN taxonomy_runs run ON run.id=gate.taxonomy_run_id
+                WHERE run.status IN ('running','failed','ready_for_review') AND NOT gate.gate_passed
+            )"""
+        )
+        failed = await connection.fetchval(
+            """SELECT EXISTS (
+                SELECT 1 FROM taxonomy_runs run
+                WHERE run.status='failed' OR (run.status IN ('pending','running') AND EXISTS (
+                    SELECT 1 FROM taxonomy_run_stages stage
+                    WHERE stage.taxonomy_run_id=run.id AND stage.status IN ('failed','cancelled')
+                ))
+            )"""
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "taxonomy_unavailable"},
+            detail={"code": "taxonomy_quality_blocked" if blocked else
+                    "taxonomy_candidate_failed" if failed else "taxonomy_first_run"},
         )
 
 

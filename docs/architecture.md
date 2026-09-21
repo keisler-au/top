@@ -1,5 +1,10 @@
 # Architecture
 
+For normative implementation rules and ownership, see the
+[architecture contracts](architecture-contracts.md). The
+[baseline review](reviews/architecture-baseline.md) records known discrepancies
+between this reference, current code and historical plans.
+
 ## Components
 
 ```text
@@ -68,7 +73,7 @@ HTTP input
 → embeddings
 → immutable batch snapshot
 → leased clustering, topic naming, theme inference, reconciliation, and quality
-→ one published taxonomy run
+→ quality-gated automatic publication of one taxonomy run
 ```
 
 The original input remains the source of truth. PostgreSQL stores pipeline
@@ -111,4 +116,4 @@ classifications, themes, suggestions, and assignment metadata are retained
 only in the immutable `taxonomy_legacy_archive` audit schema. The mutable
 legacy source tables and topic columns were destructively removed by migration
 `037_drop_legacy_taxonomy_schema.sql`; the archive is their only retained
-taxonomy history. See the active [current work packages](work-packages.md).
+taxonomy history. See the [work-package archive](archive/work-packages.md).

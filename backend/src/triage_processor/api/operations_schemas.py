@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -19,6 +20,9 @@ class TaxonomyRunMetrics(BaseModel):
     noise_count: int = 0
     validation_failures: int = 0
     last_published_at: datetime | None = None
+    automation_state: Literal["preparing_evidence", "waiting_for_automation", "running_candidate", "automatically_published", "blocked_by_quality", "blocked_by_failure"] = "preparing_evidence"
+    automation_policy_version: str | None = None
+    automation_failure_code: str | None = None
 
 
 class OperationsSummaryResponse(BaseModel):

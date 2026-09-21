@@ -29,6 +29,7 @@ class SnapshotRequest:
     theme_model: str
     topic_prompt_version: str
     theme_prompt_version: str
+    after_cutoff: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -63,8 +64,12 @@ WITH canonical_targets AS (
         inputs.id AS original_input_id,
         NULL::bigint AS segment_input_id
     FROM original_inputs AS inputs
-    WHERE inputs.status = 'completed'
+    -- ready_for_analysis is the terminal evidence-preparation state. completed
+    -- is retained solely for snapshots of installations created before that
+    -- lifecycle name was introduced.
+    WHERE inputs.status IN ('ready_for_analysis', 'completed')
       AND inputs.created_at <= $1
+      AND ($2::timestamptz IS NULL OR inputs.created_at > $2)
       AND NOT EXISTS (
           SELECT 1
           FROM segment_inputs AS segments
@@ -81,8 +86,9 @@ WITH canonical_targets AS (
     JOIN segment_inputs AS segments
       ON segments.original_input_id = inputs.id
      AND segments.created_at <= $1
-    WHERE inputs.status = 'completed'
+    WHERE inputs.status IN ('ready_for_analysis', 'completed')
       AND inputs.created_at <= $1
+      AND ($2::timestamptz IS NULL OR segments.created_at > $2)
 )
 SELECT
     targets.original_input_id,
@@ -252,7 +258,10 @@ async def _enqueue_if_possible(pool: asyncpg.Pool, run_id: int) -> bool:
             "SELECT EXISTS (SELECT 1 FROM taxonomy_run_jobs WHERE status IN ('pending', 'processing'))"
         )
         if active:
-            return False
+            return bool(await connection.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM taxonomy_run_jobs WHERE taxonomy_run_id=$1 AND status IN ('pending','processing'))",
+                run_id,
+            ))
         try:
             await connection.fetchrow("SELECT * FROM enqueue_taxonomy_run($1)", run_id)
         except asyncpg.PostgresError:
@@ -288,7 +297,9 @@ async def create_taxonomy_snapshot(
                 result = _result_from_row(existing, queued=False, reused=True)
             else:
                 cutoff = await connection.fetchval("SELECT CURRENT_TIMESTAMP")
-                evidence = await connection.fetch(_CANONICAL_EVIDENCE_SQL, cutoff)
+                evidence = await connection.fetch(
+                    _CANONICAL_EVIDENCE_SQL, cutoff, request.after_cutoff
+                )
                 counts = _validation_counts(evidence, request)
                 if any(
                     counts[key]

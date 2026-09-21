@@ -4,6 +4,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
+# The optional Google Sheets worker bind-mounts its service-account file here.
+# Docker Desktop requires the target directory to exist before mounting a file.
+RUN mkdir -p /run/secrets
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

@@ -1,9 +1,8 @@
 # Work-package archive
 
-Archived plans are historical context only. They are not instructions for new
-implementation; all approved in-flight work is in
-[the current work packages](../work-packages.md). A plan enters this directory
-only after its final status and archive reason are recorded.
+Archived plans are historical context only. There is currently no in-flight
+work-package plan; create a new current plan only when approved work begins.
+A plan enters this directory only after its final status and archive reason are recorded.
 
 | Archived document | Final status | Archive reason |
 | --- | --- | --- |
@@ -11,6 +10,8 @@ only after its final status and archive reason are recorded.
 | [Taxonomy operational-reliability plan](taxonomy-operational-reliability-work-packages.md) | Superseded | It stopped short of incremental-taxonomy retirement. |
 | [Public website work packages](public-website-work-packages.md) | Superseded and incorporated | Its reviewed, batch-aligned PW packages are now part of the current plan. |
 | Batch-taxonomy delivery (BT-WP1–BT-WP8) | Complete | Its concise deployed-state record is [Current state](../current-state.md); the shared current plan remains active for the PW programme. |
+| [Batch-taxonomy and public-website work packages](batch-taxonomy-and-public-website-work-packages.md) | Complete | All BT-WP1–BT-WP8 and PW-WP1a–PW-WP6 packages were completed with recorded evidence; automatic taxonomy orchestration is a subsequent programme. |
+| [Automatic taxonomy delivery](automatic-taxonomy-work-packages.md) | Complete | AT-WP1–AT-WP3 shipped durable automatic snapshotting, quality-gated promotion, operator status, and delivery verification. |
 
 The detailed dashboard/article and first batch-taxonomy work-package documents
 were consolidated because their planned states diverged from the repository and

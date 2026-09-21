@@ -20,6 +20,7 @@ from triage_processor.taxonomy_snapshots import (
     SnapshotValidationError,
     create_taxonomy_snapshot,
 )
+from triage_processor.taxonomy_automation import reconcile_manual_snapshot
 
 router = APIRouter(prefix="/taxonomy-runs", tags=["taxonomy review"])
 
@@ -88,6 +89,10 @@ async def create_taxonomy_run(
             status_code=status.HTTP_409_CONFLICT,
             detail={"code": "taxonomy_idempotency_conflict"},
         ) from error
+    await reconcile_manual_snapshot(
+        request.app.state.db_pool, run_id=result.id, cutoff=result.source_cutoff,
+        policy_version=os.getenv("TAXONOMY_AUTOMATION_POLICY_VERSION", "taxonomy-automation-v1"),
+    )
     return TaxonomyRunCreated(
         id=result.id,
         status=result.status,
@@ -185,13 +190,18 @@ async def schedule_taxonomy_run(run_id: int, request: Request) -> TaxonomyRunSum
     """Queue an existing frozen run; creation of its snapshot remains explicit."""
     await require_operator(request, mutation=True)
     async with request.app.state.db_pool.acquire() as connection:
-        try:
-            await connection.fetchrow("SELECT * FROM enqueue_taxonomy_run($1)", run_id)
-        except asyncpg.PostgresError as error:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={"code": "taxonomy_schedule_conflict"},
-            ) from error
-        summary = await connection.fetchrow(_SUMMARY_SQL, run_id)
+        async with connection.transaction():
+            try:
+                await connection.fetchrow("SELECT * FROM enqueue_taxonomy_run($1)", run_id)
+            except asyncpg.PostgresError as error:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={"code": "taxonomy_schedule_conflict"},
+                ) from error
+            await connection.execute(
+                """UPDATE taxonomy_automation_decisions
+                   SET status='reserved', failure_code=NULL
+                   WHERE taxonomy_run_id=$1 AND status IN ('failed','snapshotted')""", run_id,
+            )
+            summary = await connection.fetchrow(_SUMMARY_SQL, run_id)
     return _summary(summary)
-

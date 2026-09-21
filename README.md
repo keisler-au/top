@@ -26,7 +26,7 @@ Input received
 → eligibility and segmentation
 → full-input and segment embeddings
 → immutable batch snapshot
-→ leased taxonomy stages and one published run
+→ automatic snapshot, leased taxonomy stages, and quality-gated publication
 → evidence-grounded article generation
 → explicit editorial approval
 ```
@@ -55,9 +55,10 @@ The embedding model does not access the database directly.
 
 ### Taxonomy scheduler and article generation
 
-The taxonomy scheduler processes frozen run stages (clustering, topic naming,
-theme inference, reconciliation, and quality) under durable leases; it never
-uses per-input topic/theme jobs. The article-generation worker:
+The taxonomy scheduler automatically snapshots eligible evidence, processes
+frozen run stages (clustering, topic naming, theme inference, reconciliation,
+and quality) under durable leases, and publishes only a gate-qualified run. It
+never uses per-input topic/theme jobs. The article-generation worker:
 
 Processes durable generation jobs independently of the evidence pipeline.
 

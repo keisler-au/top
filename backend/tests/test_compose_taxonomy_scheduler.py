@@ -27,6 +27,9 @@ class TaxonomySchedulerComposeTests(unittest.TestCase):
             "TAXONOMY_POLL_INTERVAL", "TAXONOMY_LEASE_SECONDS", "TAXONOMY_MAX_ATTEMPTS",
             "TAXONOMY_RETRY_BASE_SECONDS", "TAXONOMY_RETRY_MAX_SECONDS",
             "TAXONOMY_SCHEDULER_CONFIGURATION_VERSION",
+            "TAXONOMY_AUTOMATION_ENABLED", "TAXONOMY_AUTOMATION_POLICY_VERSION",
+            "TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE", "TAXONOMY_AUTOMATION_QUIET_SECONDS",
+            "TAXONOMY_EMBEDDING_DIMENSION",
         ):
             with self.subTest(setting=setting):
                 self.assertIn(setting, service)

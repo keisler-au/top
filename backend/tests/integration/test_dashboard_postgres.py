@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import unittest
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import asyncpg
@@ -12,12 +13,15 @@ import httpx
 from triage_processor.api.routes import articles, dashboard, generation, form_sources, inputs, operations, taxonomy_review, public_site
 from triage_processor.articles import canonical_theme_ids
 from triage_processor.taxonomy_snapshots import SnapshotRequest, create_taxonomy_snapshot
+from triage_processor.taxonomy_automation import AutomationPolicy, evaluate_automation, promote_automatic_candidates
 from triage_processor.taxonomy_stage_quality import (
     THRESHOLD_VERSION,
     attestation_input_sha256,
     compute_run_quality,
 )
-from triage_processor.taxonomy_stages import claim_next_stage, complete_stage
+from triage_processor.taxonomy_stages import claim_next_stage, complete_stage, fail_stage, retry_stage, cancel_stage
+from triage_processor.taxonomy_scheduler import process_stage
+from triage_processor.taxonomy_clustering import ClusterPlan, CandidateCluster
 from triage_processor.workers.article_generation import claim_job, process_job
 
 DSN = os.environ.get("TRIAGE_TEST_DATABASE_URL")
@@ -227,6 +231,17 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"]["code"], "taxonomy_publication_disabled")
 
+    async def test_human_publish_remains_token_protected_when_automatic_promotion_exists(self):
+        anonymous = httpx.AsyncClient(
+            transport=httpx.ASGITransport(self.app), base_url="http://test"
+        )
+        self.addAsyncCleanup(anonymous.aclose)
+        with patch.dict(os.environ, {"TAXONOMY_PUBLICATION_ENABLED": "true"}, clear=False):
+            response = await anonymous.post("/taxonomy-runs/1/publish", json={
+                "expected_updated_at": "2026-01-01T00:00:00Z", "operator": "anonymous",
+            })
+        self.assertEqual(response.status_code, 401)
+
     async def test_database_publication_rejects_absent_or_failed_attestation(self):
         async def candidate_run() -> int:
             return await self.admin.fetchval("""
@@ -256,6 +271,65 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT publish_taxonomy_run($1, CURRENT_TIMESTAMP, 'fixture')", failed
             )
 
+    async def test_passing_automatic_candidate_publishes_once_and_supersedes_prior_run(self):
+        async def automatic_candidate(*, gate_passed: bool, key: str) -> int:
+            run_id = await self.admin.fetchval("""
+                INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,configuration,configuration_sha256,
+                  embedding_model,embedding_representation,embedding_dimension,clustering_model,topic_model,theme_model,topic_prompt_version,theme_prompt_version)
+                VALUES(CURRENT_TIMESTAMP,repeat('d',64),'{}'::jsonb,repeat('e',64),
+                  'fixture','fixture',2,'fixture','fixture','fixture','fixture','fixture') RETURNING id
+            """)
+            await self.admin.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1", run_id)
+            topic_id = await self.admin.fetchval("INSERT INTO topics DEFAULT VALUES RETURNING id")
+            revision_id = await self.admin.fetchval("""
+                INSERT INTO topic_revisions(taxonomy_run_id,topic_id,cluster_key,name,normalized_name,literal_description,support_count,continuity_decision)
+                VALUES($1,$2,$3,$3,$3,'fixture',1,'new') RETURNING id
+            """, run_id, topic_id, key)
+            theme_id = await self.admin.fetchval("""
+                INSERT INTO taxonomy_candidate_themes(taxonomy_run_id,name,description,rationale,inference_request,inference_response)
+                VALUES($1,$2,'fixture','fixture','{}'::jsonb,'{}'::jsonb) RETURNING id
+            """, run_id, key)
+            await self.admin.execute(
+                "INSERT INTO taxonomy_candidate_theme_topics VALUES($1,$2,$3,TRUE)", run_id, theme_id, revision_id
+            )
+            reconciled = await self.admin.fetchval("""
+                INSERT INTO taxonomy_reconciled_themes(taxonomy_run_id,canonical_candidate_theme_id,normalized_name,topic_set_sha256)
+                VALUES($1,$2,$3,repeat('a',64)) RETURNING id
+            """, run_id, theme_id, key)
+            await self.admin.execute(
+                "INSERT INTO taxonomy_reconciled_theme_antecedents VALUES($1,$2,$3,'canonical')", run_id, reconciled, theme_id
+            )
+            await self.admin.execute("""
+                INSERT INTO taxonomy_automation_decisions(idempotency_key,policy_version,evidence_cutoff,status,taxonomy_run_id)
+                VALUES($1,'automatic-promotion-v1',CURRENT_TIMESTAMP,'snapshotted',$2)
+            """, f"automatic:automatic-promotion-v1:{key}", run_id)
+            await self.admin.execute("""
+                INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,thresholds,threshold_version,gate_passed,failures,input_sha256)
+                VALUES($1,'{}'::jsonb,'{}'::jsonb,'fixture-v1',$2,$3,repeat('f',64))
+            """, run_id, gate_passed, [] if gate_passed else ["fixture_failure"])
+            await self.admin.execute("UPDATE taxonomy_runs SET status='ready_for_review',completed_at=CURRENT_TIMESTAMP WHERE id=$1", run_id)
+            return run_id
+
+        policy = AutomationPolicy(version="automatic-promotion-v1")
+        passing = await automatic_candidate(gate_passed=True, key="passing")
+        self.assertEqual(await promote_automatic_candidates(self.pool, policy), 1)
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", passing), "published")
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=1"), "superseded")
+        decision = await self.admin.fetchrow("""
+            SELECT decision_kind,automation_policy_version,decided_by,gate_input_sha256
+            FROM taxonomy_publication_decisions WHERE taxonomy_run_id=$1
+        """, passing)
+        self.assertEqual(tuple(decision), ("automatic", "automatic-promotion-v1", "taxonomy-automation", "f" * 64))
+        self.assertEqual(await promote_automatic_candidates(self.pool, policy), 0)
+        self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM taxonomy_publication_decisions WHERE taxonomy_run_id=$1", passing), 1)
+
+        failed = await automatic_candidate(gate_passed=False, key="failed")
+        self.assertEqual(await promote_automatic_candidates(self.pool, policy), 0)
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", failed), "ready_for_review")
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", passing), "published")
+        with self.assertRaisesRegex(asyncpg.PostgresError, "gate is not attested"):
+            await self.admin.fetchval("SELECT publish_taxonomy_run_automatically($1,$2)", failed, "wrong-policy")
+
 
     async def test_operations_summary_is_bounded_and_content_safe(self):
         await self.admin.execute("""
@@ -281,6 +355,36 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('last_error', str(payload))
         self.assertNotIn('must never be exposed', str(payload))
         self.assertNotIn('credential-like failure', str(payload))
+        self.assertEqual(payload['taxonomy_runs']['automation_state'], 'automatically_published')
+        self.assertIsNone(payload['taxonomy_runs']['automation_policy_version'])
+
+    async def test_automation_status_contract_is_bounded_across_lifecycle_states(self):
+        await self.admin.execute("""
+            INSERT INTO taxonomy_automation_checkpoints(singleton,policy_version,last_failure_code)
+            VALUES(TRUE,'status-policy-v1',NULL)
+        """)
+        published = await self.get('/operations/summary')
+        self.assertEqual(published['taxonomy_runs']['automation_state'], 'automatically_published')
+        self.assertEqual(published['taxonomy_runs']['automation_policy_version'], 'status-policy-v1')
+        self.assertNotIn('idempotency', str(published))
+
+        candidate = await self.admin.fetchval("""
+            INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,configuration,configuration_sha256,
+              embedding_model,embedding_representation,embedding_dimension,clustering_model,topic_model,theme_model,topic_prompt_version,theme_prompt_version)
+            VALUES(CURRENT_TIMESTAMP,repeat('d',64),'{}'::jsonb,repeat('e',64),
+              'fixture','fixture',2,'fixture','fixture','fixture','fixture','fixture') RETURNING id
+        """)
+        running = await self.get('/operations/summary')
+        self.assertEqual(running['taxonomy_runs']['automation_state'], 'running_candidate')
+        await self.admin.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1", candidate)
+        await self.admin.execute("UPDATE taxonomy_runs SET status='ready_for_review',completed_at=CURRENT_TIMESTAMP WHERE id=$1", candidate)
+        await self.admin.execute("""
+            INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,thresholds,threshold_version,gate_passed,failures,input_sha256)
+            VALUES($1,'{}'::jsonb,'{}'::jsonb,'fixture',FALSE,ARRAY['fixture_failure'],repeat('f',64))
+        """, candidate)
+        blocked = await self.get('/operations/summary')
+        self.assertEqual(blocked['taxonomy_runs']['automation_state'], 'blocked_by_quality')
+        self.assertNotIn('fixture_failure', str(blocked))
 
     async def test_operations_and_taxonomy_routes_require_the_right_operator_role(self):
         anonymous = httpx.AsyncClient(transport=httpx.ASGITransport(self.app), base_url="http://test")
@@ -671,6 +775,9 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(body["queued"])
         self.assertEqual((body["evidence_count"], body["embedding_dimension"]), (5, 2))
         run_id = body["id"]
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT status FROM taxonomy_automation_decisions WHERE taxonomy_run_id=$1", run_id
+        ), "manual")
         evidence = await self.admin.fetch(
             "SELECT original_input_id, segment_input_id FROM taxonomy_run_evidence WHERE taxonomy_run_id=$1 ORDER BY original_input_id, segment_input_id NULLS FIRST",
             run_id,
@@ -718,6 +825,121 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(changed.status_code, 409, changed.text)
         self.assertEqual(changed.json()["detail"]["code"], "taxonomy_idempotency_conflict")
+
+    async def test_automatic_snapshot_is_singleton_replayable_and_excludes_published_evidence(self):
+        published_cutoff = await self.admin.fetchval(
+            "SELECT source_cutoff FROM taxonomy_runs WHERE status='published'"
+        )
+        await self.admin.execute("""
+            INSERT INTO original_inputs(original_text,source,status,created_at)
+            VALUES('Automatic evidence','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds');
+        """, published_cutoff)
+        await asyncio.sleep(1.05)
+        await self.admin.execute("""
+            INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
+            VALUES(5,'[1,0]'::vector,'automatic-fixture','question-answer')
+        """)
+        policy = AutomationPolicy(
+            quiet_seconds=0, embedding_model="automatic-fixture",
+            embedding_representation="question-answer", embedding_dimension=2,
+            version="automatic-fixture-v1",
+        )
+        first, second = await asyncio.gather(
+            evaluate_automation(self.pool, policy), evaluate_automation(self.pool, policy),
+        )
+        self.assertIn(first.state, {"created", "recovered", "waiting"})
+        self.assertIn(second.state, {"created", "recovered", "waiting"})
+        runs = await self.admin.fetch("""
+            SELECT id FROM taxonomy_runs WHERE id <> 1 ORDER BY id
+        """)
+        self.assertEqual(len(runs), 1, (first, second))
+        run_id = runs[0]["id"]
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT count(*) FROM taxonomy_run_evidence WHERE taxonomy_run_id=$1", run_id
+        ), 1)
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT count(*) FROM taxonomy_run_jobs WHERE taxonomy_run_id=$1", run_id
+        ), 1)
+        await self.admin.execute(
+            "UPDATE taxonomy_runs SET status='failed', error_summary='candidate_failed' WHERE id=$1", run_id
+        )
+        blocked = await evaluate_automation(self.pool, policy)
+        self.assertEqual((blocked.state, blocked.reason), ("blocked", "candidate_failed"))
+        self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM taxonomy_runs WHERE id <> 1"), 1)
+        await self.admin.execute(
+            "UPDATE taxonomy_run_jobs SET status='failed', last_error='fixture_failure' WHERE taxonomy_run_id=$1", run_id
+        )
+        retried = await self.client.post(f"/taxonomy-runs/{run_id}/schedule")
+        self.assertEqual(retried.status_code, 202, retried.text)
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT status FROM taxonomy_automation_decisions WHERE taxonomy_run_id=$1", run_id
+        ), "reserved")
+
+    async def _recovery_candidate(self, key="recovery"):
+        await self.seed_snapshot_embeddings()
+        result = await create_taxonomy_snapshot(self.pool, SnapshotRequest(**self.snapshot_payload(idempotency_key=key)))
+        await self.admin.execute("""
+            INSERT INTO taxonomy_automation_decisions(idempotency_key,policy_version,evidence_cutoff,status,taxonomy_run_id)
+            VALUES($1,'recovery-v1',CURRENT_TIMESTAMP,'snapshotted',$2)
+        """, "automatic:" + key, result.id)
+        return result.id
+
+    async def test_scheduler_lifecycle_uses_computed_attestation_for_pass_and_fail(self):
+        for passing in (True, False):
+            run_id = await self._recovery_candidate(f"lifecycle-{passing}")
+            plan = ClusterPlan((CandidateCluster(0, tuple(range(5)), (1.0, 0.0), ((0, "central"),)),), (), (1.0,) * 5)
+            response = {"name": "Repeated answers", "description": "Repeated answer"} if passing else {"name": "", "description": ""}
+            async def model_response(**kwargs):
+                if "Name one evidence cluster" in kwargs["system_prompt"]:
+                    return response
+                topics = json.loads(kwargs["user_content"])["topics"]
+                return {"create_theme": True, "name": "Shared experiences", "description": "Experience feedback",
+                        "rationale": "Related experiences", "topic_revision_ids": [item["id"] for item in topics]}
+            with patch("triage_processor.taxonomy_clustering.make_cluster_plan", return_value=plan), patch(
+                "triage_processor.clients.llm.StructuredChatClient.complete", new=AsyncMock(side_effect=model_response)
+            ):
+                for expected in ("clustering", "topic_naming", "theme_inference", "theme_reconciliation", "quality", "ready_for_publication"):
+                    stage = await claim_next_stage(self.pool, lease_owner="lifecycle", lease_seconds=60)
+                    self.assertIsNotNone(stage, expected)
+                    self.assertEqual(stage.stage, expected)
+                    await process_stage(self.pool, stage, lease_seconds=60, max_attempts=1, retry_base_seconds=1, retry_max_seconds=1)
+                    self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_run_stages WHERE id=$1", stage.id), "completed", expected)
+            self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", run_id), "ready_for_review")
+            self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM taxonomy_quality_snapshots WHERE taxonomy_run_id=$1", run_id), 0)
+            self.assertEqual(await self.admin.fetchval("SELECT gate_passed FROM taxonomy_release_attestations WHERE taxonomy_run_id=$1", run_id), passing)
+            self.assertEqual(await promote_automatic_candidates(self.pool, AutomationPolicy(version="recovery-v1")), int(passing))
+            self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_run_jobs WHERE taxonomy_run_id=$1", run_id), "completed")
+
+    async def test_terminal_stage_failure_retry_cancel_and_stale_completion(self):
+        run_id = await self._recovery_candidate()
+        stage = await claim_next_stage(self.pool, lease_owner="first", lease_seconds=60)
+        result = await fail_stage(self.pool, stage, ValueError("private"), max_attempts=1, retry_base_seconds=1, retry_max_seconds=1)
+        self.assertEqual(result, "failed")
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", run_id), "failed")
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_run_jobs WHERE taxonomy_run_id=$1", run_id), "failed")
+        self.assertTrue(await retry_stage(self.pool, stage.id))
+        retry = await claim_next_stage(self.pool, lease_owner="second", lease_seconds=60)
+        self.assertEqual(retry.attempt, 2)
+        self.assertFalse(await complete_stage(self.pool, stage, output_material="stale"))
+        self.assertTrue(await cancel_stage(self.pool, retry.id))
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_run_jobs WHERE taxonomy_run_id=$1", run_id), "cancelled")
+        self.assertFalse(await complete_stage(self.pool, retry, output_material="cancelled"))
+        response = await self.client.post(f"/taxonomy-runs/{run_id}/schedule")
+        self.assertEqual(response.status_code, 409)
+
+    async def test_automation_recovers_snapshot_committed_before_decision_link(self):
+        await self.seed_snapshot_embeddings()
+        policy = AutomationPolicy(version="crash-v1", embedding_model="embeddinggemma", embedding_dimension=2, quiet_seconds=0)
+        key = "automatic:crash-v1:reserved"
+        await self.admin.execute("""
+            INSERT INTO taxonomy_automation_decisions(idempotency_key,policy_version,evidence_cutoff,status)
+            VALUES($1,$2,CURRENT_TIMESTAMP,'reserved')
+        """, key, policy.version)
+        snapshot = await create_taxonomy_snapshot(self.pool, policy.snapshot_request(idempotency_key=key, after_cutoff=None))
+        result = await evaluate_automation(self.pool, policy)
+        self.assertEqual((result.state, result.run_id), ("recovered", snapshot.id))
+        self.assertEqual(await self.admin.fetchval("SELECT taxonomy_run_id FROM taxonomy_automation_decisions WHERE idempotency_key=$1", key), snapshot.id)
+        self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM taxonomy_runs"), 2)
 
     async def test_snapshot_validation_is_bounded_and_rolls_back(self):
         await self.seed_snapshot_embeddings(model="different-model")

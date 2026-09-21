@@ -20,6 +20,7 @@ from triage_processor.taxonomy_stage_quality import compute_run_quality
 from triage_processor.taxonomy_stages import ClaimedStage, bounded_error_class, cancel_stage, claim_next_stage, complete_ready_for_review_stage, complete_stage, fail_stage, renew_stage, retry_stage
 from triage_processor.taxonomy_themes import infer_run
 from triage_processor.taxonomy_topics import materialize_run
+from triage_processor.taxonomy_automation import AutomationPolicy, evaluate_automation
 
 
 LOGGER = logging.getLogger(__name__)
@@ -98,8 +99,8 @@ async def _ready_for_review(pool: asyncpg.Pool, stage: ClaimedStage) -> object:
     return {"run_id": stage.run_id, "quality_attested": True}
 
 
-# This final stage makes a candidate reviewable; BT-WP4 still owns every
-# publication-gate decision and no scheduler path can publish a run.
+# The final stage makes a candidate reviewable; automation subsequently
+# promotes it through the database publication gate.
 HANDLERS: dict[str, StageHandler] = {
     "clustering": _cluster,
     "topic_naming": _name_topics,
@@ -115,7 +116,7 @@ def required_migration_filenames() -> tuple[str, ...]:
     # The migration runner is mounted separately from the worker image. This
     # explicit durable-stage contract marker must be advanced with every
     # scheduler schema change.
-    return ("030_add_taxonomy_release_attestations.sql",)
+    return ("041_repair_taxonomy_stage_recovery.sql",)
 
 
 async def _heartbeat(pool: asyncpg.Pool, stage: ClaimedStage, lease_seconds: float) -> None:
@@ -136,7 +137,7 @@ async def _mark_run_started(pool: asyncpg.Pool, stage: ClaimedStage) -> None:
         await connection.execute(
             """
             UPDATE taxonomy_runs AS run
-            SET status = 'running', started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+            SET status = 'running', started_at = COALESCE(run.started_at, CURRENT_TIMESTAMP),
                 error_summary = NULL
             FROM taxonomy_run_stages AS stages
             WHERE run.id = stages.taxonomy_run_id
@@ -187,6 +188,7 @@ async def process_stage(
 async def run_worker(
     *, once: bool, poll_interval: float, lease_seconds: float, max_attempts: int,
     retry_base_seconds: float = 5, retry_max_seconds: float = 300,
+    automation_policy: AutomationPolicy | None = None,
 ) -> None:
     SchedulerSettings(
         poll_interval=poll_interval, lease_seconds=lease_seconds,
@@ -194,9 +196,16 @@ async def run_worker(
         retry_max_seconds=retry_max_seconds,
     ).validate()
     identity = worker_id()
+    automation_policy = automation_policy or AutomationPolicy.from_env()
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
     try:
         while True:
+            try:
+                await evaluate_automation(pool, automation_policy)
+            except Exception:
+                # Policy state records bounded failures.  Do not let a transient
+                # automation read failure stop recovery of already-queued work.
+                LOGGER.exception("Taxonomy automation evaluation failed")
             stage = await claim_next_stage(
                 pool, lease_owner=identity, lease_seconds=lease_seconds,
                 allowed_stages=tuple(HANDLERS),
@@ -260,6 +269,7 @@ def main() -> None:
     action.add_argument("--cancel-stage-id", type=int)
     action.add_argument("--healthcheck", action="store_true")
     settings = SchedulerSettings.from_env()
+    automation_policy = AutomationPolicy.from_env()
     parser.add_argument("--poll-interval", type=float, default=settings.poll_interval)
     parser.add_argument("--lease-seconds", type=float, default=settings.lease_seconds)
     parser.add_argument("--max-attempts", type=int, default=settings.max_attempts)
@@ -277,6 +287,7 @@ def main() -> None:
                 lease_seconds=args.lease_seconds, max_attempts=args.max_attempts,
                 retry_base_seconds=args.retry_base_seconds,
                 retry_max_seconds=args.retry_max_seconds,
+                automation_policy=automation_policy,
             )
             return
         pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=1)

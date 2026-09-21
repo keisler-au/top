@@ -27,6 +27,11 @@ def request(**overrides):
 
 
 class TaxonomySnapshotTests(unittest.TestCase):
+    def test_snapshot_admits_the_current_ready_for_analysis_lifecycle_state(self):
+        from triage_processor.taxonomy_snapshots import _CANONICAL_EVIDENCE_SQL
+
+        self.assertIn("'ready_for_analysis'", _CANONICAL_EVIDENCE_SQL)
+        self.assertIn("'completed'", _CANONICAL_EVIDENCE_SQL)
     def test_requires_explicit_versioned_configuration(self):
         with self.assertRaisesRegex(ValueError, "configuration.version"):
             validate_snapshot_request(request(configuration={"clustering": {}}))

@@ -78,19 +78,45 @@ async def operations_summary(request: Request) -> OperationsSummaryResponse:
         taxonomy = await connection.fetchrow(
             """
             SELECT
-                count(*) FILTER (WHERE jobs.status IN ('pending', 'processing'))::bigint AS active,
-                count(*) FILTER (WHERE runs.status = 'ready_for_review')::bigint AS review_backlog,
-                max(runs.published_at) AS last_published_at,
-                count(DISTINCT evidence.id)::bigint AS snapshot_evidence_count,
-                count(DISTINCT memberships.evidence_id) FILTER (WHERE memberships.decision = 'noise')::bigint AS noise_count,
-                count(DISTINCT attempts.id) FILTER (WHERE NOT attempts.accepted)::bigint AS validation_failures
-            FROM taxonomy_runs runs
-            LEFT JOIN taxonomy_run_jobs jobs ON jobs.taxonomy_run_id = runs.id
-            LEFT JOIN taxonomy_run_evidence evidence ON evidence.taxonomy_run_id = runs.id
-            LEFT JOIN taxonomy_cluster_memberships memberships ON memberships.taxonomy_run_id = runs.id
-            LEFT JOIN taxonomy_topic_naming_attempts attempts ON attempts.taxonomy_run_id = runs.id
+                (SELECT count(*) FROM taxonomy_run_jobs WHERE status IN ('pending','processing')) AS active,
+                (SELECT count(*) FROM taxonomy_runs WHERE status='ready_for_review') AS review_backlog,
+                (SELECT max(published_at) FROM taxonomy_runs) AS last_published_at,
+                (SELECT count(*) FROM taxonomy_run_evidence) AS snapshot_evidence_count,
+                (SELECT count(*) FROM taxonomy_cluster_memberships WHERE decision='noise') AS noise_count,
+                (SELECT count(*) FROM taxonomy_topic_naming_attempts WHERE NOT accepted) AS validation_failures
             """
         )
+        automation = await connection.fetchrow("""
+            SELECT checkpoint.policy_version, checkpoint.last_failure_code,
+                   count(inputs.id) FILTER (WHERE inputs.status IN ('new','ready_for_embedding'))::bigint AS preparing_evidence,
+                   EXISTS (SELECT 1 FROM taxonomy_runs WHERE status IN ('pending','running','ready_for_review')) AS candidate_active,
+                   EXISTS (SELECT 1 FROM taxonomy_release_attestations gate
+                           JOIN taxonomy_runs run ON run.id=gate.taxonomy_run_id
+                           WHERE run.status IN ('running','failed','ready_for_review') AND NOT gate.gate_passed) AS quality_blocked,
+                   COALESCE((SELECT status='failed' FROM taxonomy_runs ORDER BY id DESC LIMIT 1), FALSE) AS candidate_failed,
+                   EXISTS (SELECT 1 FROM taxonomy_runs WHERE status='published') AS has_published
+            FROM taxonomy_automation_checkpoints checkpoint
+            FULL JOIN original_inputs inputs ON TRUE
+            GROUP BY checkpoint.policy_version, checkpoint.last_failure_code
+            ORDER BY checkpoint.policy_version NULLS LAST
+            LIMIT 1
+        """)
+        if automation is None:
+            automation = {"policy_version": None, "last_failure_code": None,
+                          "preparing_evidence": 0, "candidate_active": False,
+                          "quality_blocked": False, "has_published": False, "candidate_failed": False}
+        if automation["quality_blocked"]:
+            automation_state = "blocked_by_quality"
+        elif automation["candidate_active"]:
+            automation_state = "running_candidate"
+        elif automation["candidate_failed"]:
+            automation_state = "blocked_by_failure"
+        elif automation["has_published"]:
+            automation_state = "automatically_published"
+        elif automation["preparing_evidence"]:
+            automation_state = "preparing_evidence"
+        else:
+            automation_state = "waiting_for_automation"
     return OperationsSummaryResponse(
         evidence_pipeline=[_queue_metrics(row, stage=row["stage"]) for row in pipeline_rows],
         topic_validation_corrections=0,
@@ -115,5 +141,8 @@ async def operations_summary(request: Request) -> OperationsSummaryResponse:
             active=int(taxonomy["active"]), review_backlog=int(taxonomy["review_backlog"]),
             snapshot_evidence_count=int(taxonomy["snapshot_evidence_count"]), noise_count=int(taxonomy["noise_count"]),
             validation_failures=int(taxonomy["validation_failures"]), last_published_at=taxonomy["last_published_at"],
+            automation_state=automation_state,
+            automation_policy_version=automation["policy_version"],
+            automation_failure_code=automation["last_failure_code"],
         ),
     )

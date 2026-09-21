@@ -64,9 +64,10 @@ transition. Batch taxonomy work is claimed only from `taxonomy_run_stages` by
 `taxonomy-scheduler`; no legacy topic/theme service or runtime setting exists.
 
 `POST /taxonomy-runs` and `python -m triage_processor.taxonomy_snapshots`
-create an immutable candidate snapshot. The `taxonomy-scheduler` Compose
-service claims the separate `taxonomy_run_jobs` stages using renewable leases;
-it can build candidate runs but cannot publish one. Its health check verifies
+remain protected recovery tools. Normal Compose operation automatically creates
+an immutable candidate when eligible embeddings meet the versioned policy. The
+`taxonomy-scheduler` claims the separate `taxonomy_run_jobs` stages using
+renewable leases and publishes only a passing automatic candidate. Its health check verifies
 that the durable stage schema is reachable after migrations complete.
 
 ```text
@@ -76,7 +77,15 @@ TAXONOMY_MAX_ATTEMPTS=3
 TAXONOMY_RETRY_BASE_SECONDS=5
 TAXONOMY_RETRY_MAX_SECONDS=300
 TAXONOMY_SCHEDULER_CONFIGURATION_VERSION=taxonomy-scheduler-v1
+TAXONOMY_AUTOMATION_ENABLED=true
+TAXONOMY_AUTOMATION_POLICY_VERSION=taxonomy-automation-v1
+TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE=1
+TAXONOMY_AUTOMATION_QUIET_SECONDS=30
 ```
+
+Set `TAXONOMY_AUTOMATION_ENABLED=false` to pause new automatic snapshots and
+promotion without withdrawing an existing publication. `GET /operations/summary`
+reports only bounded automation state, policy version, and failure code.
 
 `TAXONOMY_POLL_INTERVAL` is the candidate-stage scheduling cadence. Only one
 pending or processing `taxonomy_run_jobs` row is permitted by the database;
@@ -97,9 +106,9 @@ thresholds, failures, and a hash binding those inputs in one immutable
 `taxonomy_release_attestations` row per run. It never reads raw evidence into
 the attestation and accepts no operator- or API-supplied quality signals.
 
-`TAXONOMY_PUBLICATION_ENABLED` defaults to `false` in Compose. Even when an
-operator enables that deployment switch, PostgreSQL rejects publication unless
-the candidate has a passing immutable attestation. Authentication and the
+Human publication defaults to `false` in Compose and remains token-protected.
+Automatic promotion needs neither token nor switch, but PostgreSQL accepts it
+only for a matching durable automation policy and passing immutable attestation. Authentication and the
 protected operations API are configured with the following non-empty secrets:
 
 ```text

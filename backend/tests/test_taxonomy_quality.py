@@ -11,6 +11,7 @@ from triage_processor.taxonomy_quality import (
 class TaxonomyQualityTests(unittest.TestCase):
     def test_computed_gate_accepts_exact_threshold_values(self):
         passed, failures = evaluate_computed_gate({
+            "reconciled_theme_count": 1,
             "snapshot_completeness": THRESHOLDS["minimum_snapshot_completeness"],
             "noise_rate": THRESHOLDS["maximum_noise_rate"],
             "topic_acceptance_rate": THRESHOLDS["minimum_topic_acceptance_rate"],
@@ -21,6 +22,7 @@ class TaxonomyQualityTests(unittest.TestCase):
 
     def test_computed_gate_reports_each_failed_aggregate(self):
         passed, failures = evaluate_computed_gate({
+            "reconciled_theme_count": 1,
             "snapshot_completeness": .5,
             "noise_rate": .5,
             "topic_acceptance_rate": .5,
@@ -32,8 +34,18 @@ class TaxonomyQualityTests(unittest.TestCase):
             "topic_acceptance_rate_low", "duplicate_topic_rate_exceeded",
         ))
 
+    def test_gate_rejects_a_candidate_that_cannot_materialize_themes(self):
+        passed, failures = evaluate_computed_gate({
+            "snapshot_completeness": 1, "noise_rate": 0,
+            "topic_acceptance_rate": 1, "duplicate_topic_rate": 0,
+            "reconciled_theme_count": 0,
+        })
+        self.assertFalse(passed)
+        self.assertEqual(failures, ("reconciled_themes_missing",))
+
     def test_attestation_hash_binds_metrics_policy_and_version(self):
         metrics = {
+            "reconciled_theme_count": 1,
             "snapshot_completeness": 1.0, "noise_rate": .2,
             "topic_acceptance_rate": .9, "duplicate_topic_rate": .0,
         }

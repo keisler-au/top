@@ -1,11 +1,12 @@
 # Current state
 
 The application is a batch-taxonomy editorial system. Inputs are prepared by
-eligibility/segmentation and embedding workers; an operator creates an
-immutable evidence snapshot, and the taxonomy scheduler builds a candidate
-run through leased stages. Exactly one gate-attested, explicitly published run
-serves every taxonomy reader and article-generation target. Before first
-publication, taxonomy readers return `taxonomy_unavailable`.
+eligibility/segmentation and embedding workers; the scheduler automatically
+snapshots eligible evidence, builds a leased candidate, and publishes only
+after its immutable quality gate passes. Exactly one published run serves every
+taxonomy reader and article-generation target. Before first publication,
+taxonomy readers return a bounded first-run status; a failed gate reports a
+bounded quality-blocked status while retaining any prior published run.
 
 Incremental per-input topic assignment and live theme materialisation have
 been removed. `worker_jobs` is limited to evidence preparation. Historical
@@ -13,12 +14,11 @@ incremental classifications and retired rollout records exist only in the
 immutable, protected `taxonomy_legacy_archive`; they are never a reader
 fallback.
 
-Publication defaults off and requires a configured mutation token, an
-immutable passing quality attestation, and an explicit operation. Rollback is
-also explicit and preserves publication decisions. See [Architecture](architecture.md),
+Human publication defaults off and requires a configured mutation token. The
+automatic transition is database-gated by an immutable passing attestation and
+durable policy decision. Rollback remains explicit and preserves publication
+decisions. See [Architecture](architecture.md),
 [API reference](api.md), and [Operations](operations.md) for the supported
 contracts and procedures.
 
-The remaining approved delivery work is the public website programme in
-[current work packages](work-packages.md). Historical plans are in
-[the archive](archive/work-packages.md).
+Historical plans are in [the archive](archive/work-packages.md).

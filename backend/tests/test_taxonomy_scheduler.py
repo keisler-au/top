@@ -3,7 +3,8 @@ import os
 import unittest
 from unittest.mock import patch
 
-from triage_processor.taxonomy_scheduler import SchedulerSettings, check_health, process_stage, required_migration_filenames
+from triage_processor.taxonomy_automation import AutomationPolicy
+from triage_processor.taxonomy_scheduler import SchedulerSettings, _mark_run_started, check_health, process_stage, required_migration_filenames
 
 
 class _HealthConnection:
@@ -60,6 +61,10 @@ class TaxonomySchedulerTests(unittest.TestCase):
         self.assertIn("bounded_error_class(error)", source)
         self.assertNotIn("exc_info=", source)
 
+    def test_start_transition_qualifies_run_lifecycle_columns(self):
+        source = inspect.getsource(_mark_run_started)
+        self.assertIn("COALESCE(run.started_at", source)
+
     def test_default_settings_are_valid(self):
         SchedulerSettings().validate()
 
@@ -81,6 +86,20 @@ class TaxonomySchedulerTests(unittest.TestCase):
                 SchedulerSettings.from_env(),
                 SchedulerSettings(2, 45, 4, 3, 30),
             )
+
+    def test_automation_policy_is_versioned_and_validates_bounded_controls(self):
+        policy = AutomationPolicy(minimum_evidence=2, quiet_seconds=15, version="auto-v2")
+        policy.validate()
+        request = policy.snapshot_request(idempotency_key="automatic:auto-v2:cutoff", after_cutoff=None)
+        self.assertEqual(request.configuration["automation_policy_version"], "auto-v2")
+        self.assertEqual(request.configuration["clustering"]["algorithm"], policy.clustering_model)
+        with self.assertRaisesRegex(ValueError, "minimum evidence"):
+            AutomationPolicy(minimum_evidence=0).validate()
+
+    def test_automation_admits_ready_for_analysis_evidence(self):
+        from triage_processor.taxonomy_automation import _ELIGIBLE_SQL
+
+        self.assertIn("'ready_for_analysis'", _ELIGIBLE_SQL)
 
 
 class TaxonomySchedulerHealthTests(unittest.IsolatedAsyncioTestCase):

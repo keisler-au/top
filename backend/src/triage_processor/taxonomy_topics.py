@@ -9,6 +9,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from typing import Sequence
 
 import asyncpg
 

@@ -52,13 +52,14 @@ with history replacement to `/generate`, discarding template-page query/hash
 state so users start with a validated generation request.
 
 Taxonomy views and generation targets use the one published batch run. Before
-the first publication the API returns `taxonomy_unavailable`; it never falls
-back to retired incremental topic/theme data. Historical classifications are
+the first publication the dashboard renders a bounded first-run recovery
+message; a failed automatic gate renders a bounded quality-blocked message. It
+never falls back to retired incremental topic/theme data. Historical classifications are
 available only through the protected archive audit API, not this dashboard.
 
 ## Verification
 
 `npm test` runs the frontend unit tests. Cross-service lifecycle and taxonomy
 reliability work is tracked in the
-[documentation guide](../docs/README.md) and its active
-[work-package plan](../docs/work-packages.md).
+[documentation guide](../docs/README.md) and
+[work-package archive](../docs/archive/work-packages.md).

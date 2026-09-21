@@ -37,6 +37,19 @@ export class ApiError extends Error {
 
 export function userFacingError(error: unknown): string {
   if (error instanceof ApiError) {
+    const detail = typeof error.body === "object" && error.body !== null && "detail" in error.body
+      ? error.body.detail : null;
+    const code = typeof detail === "object" && detail !== null && "code" in detail
+      ? detail.code : null;
+    if (code === "taxonomy_first_run") {
+      return "No taxonomy has been published yet. Eligible evidence and a successful automatic candidate are required.";
+    }
+    if (code === "taxonomy_candidate_failed") {
+      return "Taxonomy processing failed. An operator must inspect the failed stage and retry it after correcting the cause.";
+    }
+    if (code === "taxonomy_quality_blocked") {
+      return "The taxonomy candidate did not meet the quality gate. An operator must review the rejected evidence or labels before a new candidate can be published.";
+    }
     if (error.status >= 500) {
       return "The server could not complete the request. Please try again.";
     }
