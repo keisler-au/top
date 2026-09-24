@@ -69,6 +69,30 @@ test("normalizes API problem responses", async () => {
     userFacingError(new ApiError(503, { detail: { code: "taxonomy_quality_blocked" } }, "Unavailable")),
     /quality gate/,
   );
+  assert.match(
+    userFacingError(new ApiError(503, { detail: { code: "taxonomy_candidate_processing" } }, "Unavailable")),
+    /candidate is processing/,
+  );
+  assert.match(
+    userFacingError(new ApiError(503, { detail: { code: "taxonomy_automation_blocked" } }, "Unavailable")),
+    /blocked/,
+  );
+  assert.match(
+    userFacingError(new ApiError(503, { detail: { code: "taxonomy_scheduler_unavailable" } }, "Unavailable")),
+    /scheduler is unavailable/,
+  );
+});
+
+test("dashboard request keeps bounded first-run failure code for user feedback", async () => {
+  const client = new ApiClient("/api", async () => Response.json(
+    { detail: { code: "taxonomy_candidate_failed" } },
+    { status: 503 },
+  ));
+  await assert.rejects(client.summary(), (error) =>
+    error instanceof ApiError
+    && error.status === 503
+    && /inspect the failed stage/.test(userFacingError(error))
+  );
 });
 
 test("creates and toggles form sources with JSON requests", async () => {

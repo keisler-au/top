@@ -16,6 +16,7 @@ from triage_processor.api.main import app
 class StubDashboardConnection:
     def __init__(self) -> None:
         self.published = True
+        self.candidate: dict[str, Any] | None = None
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.taxonomy_rows: list[dict[str, Any]] = [
             {
@@ -63,6 +64,10 @@ class StubDashboardConnection:
                 "awaiting_approval_count": 0,
                 "failed_generation_count": 0,
             }
+        if "FROM taxonomy_runs run" in query and "stage_failed" in query:
+            return self.candidate
+        if "FROM taxonomy_automation_checkpoints WHERE singleton" in query:
+            return None
         if "dashboard:taxonomy-detail" in query:
             return self.detail_row
         raise AssertionError(f"unexpected fetchrow query: {query}")
@@ -71,6 +76,10 @@ class StubDashboardConnection:
         self.calls.append((query, args))
         if "SELECT EXISTS (SELECT 1 FROM taxonomy_runs" in query:
             return self.published
+        if "SELECT EXISTS (SELECT 1 FROM worker_jobs WHERE status='failed')" in query:
+            return False
+        if "SELECT EXISTS (SELECT 1 FROM original_inputs)" in query:
+            return False
         if "taxonomy_run_stages stage" in query:
             return False
         if "taxonomy_release_attestations gate" in query:

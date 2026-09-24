@@ -20,7 +20,10 @@ from triage_processor.taxonomy_stage_quality import compute_run_quality
 from triage_processor.taxonomy_stages import ClaimedStage, bounded_error_class, cancel_stage, claim_next_stage, complete_ready_for_review_stage, complete_stage, fail_stage, renew_stage, retry_stage
 from triage_processor.taxonomy_themes import infer_run
 from triage_processor.taxonomy_topics import materialize_run
-from triage_processor.taxonomy_automation import AutomationPolicy, evaluate_automation
+from triage_processor.taxonomy_automation import (
+    AutomationPolicy, automation_evaluation_due, clear_evaluation_failures,
+    evaluate_automation, record_evaluation_failure, record_scheduler_heartbeat,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -116,7 +119,7 @@ def required_migration_filenames() -> tuple[str, ...]:
     # The migration runner is mounted separately from the worker image. This
     # explicit durable-stage contract marker must be advanced with every
     # scheduler schema change.
-    return ("041_repair_taxonomy_stage_recovery.sql",)
+    return ("042_taxonomy_automation_replay.sql",)
 
 
 async def _heartbeat(pool: asyncpg.Pool, stage: ClaimedStage, lease_seconds: float) -> None:
@@ -201,11 +204,15 @@ async def run_worker(
     try:
         while True:
             try:
-                await evaluate_automation(pool, automation_policy)
+                await record_scheduler_heartbeat(pool, automation_policy)
+                if await automation_evaluation_due(pool):
+                    await evaluate_automation(pool, automation_policy)
+                    await clear_evaluation_failures(pool)
             except Exception:
-                # Policy state records bounded failures.  Do not let a transient
-                # automation read failure stop recovery of already-queued work.
-                LOGGER.exception("Taxonomy automation evaluation failed")
+                # Continue already-queued stages, but stop automatic evaluation
+                # after three bounded attempts for one policy version.
+                attempts = await record_evaluation_failure(pool)
+                LOGGER.error("Taxonomy automation evaluation failed; attempt=%s", attempts)
             stage = await claim_next_stage(
                 pool, lease_owner=identity, lease_seconds=lease_seconds,
                 allowed_stages=tuple(HANDLERS),

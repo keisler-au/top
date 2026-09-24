@@ -88,18 +88,19 @@ class TaxonomySchedulerTests(unittest.TestCase):
             )
 
     def test_automation_policy_is_versioned_and_validates_bounded_controls(self):
-        policy = AutomationPolicy(minimum_evidence=2, quiet_seconds=15, version="auto-v2")
+        policy = AutomationPolicy(minimum_evidence=3, quiet_seconds=15, version="auto-v2")
         policy.validate()
         request = policy.snapshot_request(idempotency_key="automatic:auto-v2:cutoff", after_cutoff=None)
         self.assertEqual(request.configuration["automation_policy_version"], "auto-v2")
         self.assertEqual(request.configuration["clustering"]["algorithm"], policy.clustering_model)
+        self.assertEqual(request.configuration["clustering"]["min_cluster_size"], 3)
         with self.assertRaisesRegex(ValueError, "minimum evidence"):
             AutomationPolicy(minimum_evidence=0).validate()
 
     def test_automation_admits_ready_for_analysis_evidence(self):
-        from triage_processor.taxonomy_automation import _ELIGIBLE_SQL
+        from triage_processor.taxonomy_snapshots import _CANONICAL_EVIDENCE_SQL
 
-        self.assertIn("'ready_for_analysis'", _ELIGIBLE_SQL)
+        self.assertIn("'ready_for_analysis'", _CANONICAL_EVIDENCE_SQL)
 
 
 class TaxonomySchedulerHealthTests(unittest.IsolatedAsyncioTestCase):

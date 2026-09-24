@@ -8,7 +8,7 @@ on:
       - 'backend/tests/**'
       - 'infrastructure/postgres/**'
       - 'compose*.yaml'
-      - 'frontend/src/api/**'
+      - 'frontend/admin/**'
       - '.github/workflows/taxonomy-verification.yml'
   pull_request:
     paths:
@@ -17,7 +17,7 @@ on:
       - 'backend/tests/**'
       - 'infrastructure/postgres/**'
       - 'compose*.yaml'
-      - 'frontend/src/api/**'
+      - 'frontend/admin/**'
       - '.github/workflows/taxonomy-verification.yml'
 
 jobs:
@@ -26,3 +26,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from tests
+
+  automatic-taxonomy-journey:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f compose.taxonomy-journey.yaml up -d --build --wait
+      - run: docker compose -f compose.taxonomy-journey.yaml --profile acceptance run --rm journey
+      - if: always()
+        run: docker compose -f compose.taxonomy-journey.yaml --profile acceptance down -v
+
+  admin-frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend/admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/admin/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck

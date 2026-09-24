@@ -15,6 +15,7 @@ import asyncpg
 from triage_processor.config import DATABASE_URL
 from triage_processor.taxonomy_experiment import hdbscan_clusters, parse_pgvector
 from triage_processor.taxonomy_stages import ClaimedStage, require_stage_lease
+from triage_processor.taxonomy_snapshots import compatible_representation
 
 
 @dataclass(frozen=True)
@@ -128,7 +129,7 @@ async def load_run_evidence(connection: asyncpg.Connection, run_id: int) -> tupl
         raise ValueError("taxonomy run has no frozen evidence")
     evidence = []
     for row in rows:
-        if row["embedding_model"] != run["embedding_model"] or row["embedding_representation"] != run["embedding_representation"]:
+        if row["embedding_model"] != run["embedding_model"] or not compatible_representation(row["embedding_representation"], run["embedding_representation"]):
             raise ValueError("run evidence embedding model or representation does not match run provenance")
         vector = tuple(parse_pgvector(row["embedding"]))
         if len(vector) != run["embedding_dimension"]:

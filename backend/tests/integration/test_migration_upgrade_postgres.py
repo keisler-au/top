@@ -45,6 +45,77 @@ class MigrationUpgradePostgresTests(unittest.IsolatedAsyncioTestCase):
             if first <= int(path.name[:3]) <= last:
                 await self.connection.execute(migration_sql(path))
 
+    async def test_041_reconciles_populated_stranded_candidate_without_publication(self):
+        await self.connection.execute(legacy_base_sql())
+        await self.apply_from(13, 40)
+        run_id = await self.connection.fetchval("""
+            INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,configuration,
+              configuration_sha256,embedding_model,embedding_representation,
+              embedding_dimension,clustering_model,topic_model,theme_model,
+              topic_prompt_version,theme_prompt_version)
+            VALUES(CURRENT_TIMESTAMP,repeat('a',64),'{}'::jsonb,repeat('b',64),
+              'fixture','fixture',2,'fixture','fixture','fixture','fixture','fixture')
+            RETURNING id
+        """)
+        await self.connection.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1", run_id)
+        await self.connection.execute("INSERT INTO taxonomy_run_jobs(taxonomy_run_id) VALUES($1)", run_id)
+        await self.connection.execute("""
+            INSERT INTO taxonomy_run_stages(taxonomy_run_id,stage,attempt,status,error_class)
+            VALUES($1,'ready_for_publication',3,'failed','valueerror')
+        """, run_id)
+        await self.connection.execute("""
+            INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,thresholds,
+              threshold_version,gate_passed,failures,input_sha256)
+            VALUES($1,'{}'::jsonb,'{}'::jsonb,'fixture',FALSE,ARRAY['fixture_failure'],repeat('c',64))
+        """, run_id)
+        await self.apply_from(41, 41)
+        self.assertEqual(await self.connection.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", run_id), "failed")
+        self.assertEqual(await self.connection.fetchval("SELECT status FROM taxonomy_run_jobs WHERE taxonomy_run_id=$1", run_id), "failed")
+        self.assertEqual(await self.connection.fetchval("SELECT status FROM taxonomy_run_stages WHERE taxonomy_run_id=$1", run_id), "failed")
+        self.assertFalse(await self.connection.fetchval("SELECT gate_passed FROM taxonomy_release_attestations WHERE taxonomy_run_id=$1", run_id))
+        self.assertEqual(await self.connection.fetchval("SELECT count(*) FROM taxonomy_publication_decisions WHERE taxonomy_run_id=$1", run_id), 0)
+
+    async def test_042_preserves_reserved_delta_decision_for_replay(self):
+        await self.connection.execute(legacy_base_sql())
+        await self.apply_from(13, 41)
+        decision_id = await self.connection.fetchval("""
+            INSERT INTO taxonomy_automation_decisions(
+              idempotency_key,policy_version,evidence_cutoff,predecessor_cutoff,status)
+            VALUES('automatic:legacy:reserved','legacy',CURRENT_TIMESTAMP,
+                   CURRENT_TIMESTAMP - INTERVAL '1 day','reserved') RETURNING id
+        """)
+        await self.apply_from(42, 42)
+        row = await self.connection.fetchrow("""
+            SELECT membership_mode,failure_attempts,next_attempt_at
+            FROM taxonomy_automation_decisions WHERE id=$1
+        """, decision_id)
+        self.assertEqual(tuple(row), ("post_cutoff", 0, None))
+        with self.assertRaises(asyncpg.PostgresError):
+            await self.connection.execute(
+                "UPDATE taxonomy_automation_decisions SET membership_mode='cumulative' WHERE id=$1",
+                decision_id,
+            )
+
+    async def test_043_preserves_a_populated_rate_limit_window_on_upgrade(self):
+        await self.connection.execute(legacy_base_sql())
+        await self.apply_from(13, 42)
+        actor = "a" * 64
+        await self.connection.execute("""
+            INSERT INTO operations_rate_limit_windows(scope,actor_sha256,window_started_at,request_count)
+            VALUES('operations_read',$1,
+                   to_timestamp(floor(extract(epoch FROM CURRENT_TIMESTAMP) / 86400) * 86400),2)
+        """, actor)
+        await self.apply_from(43, 43)
+        self.assertEqual(await self.connection.fetchval(
+            "SELECT consume_operations_rate_limit('operations_read',$1,86400,3)", actor
+        ), 3)
+        self.assertEqual(await self.connection.fetchval(
+            "SELECT consume_operations_rate_limit('operations_read',$1,86400,3)", actor
+        ), 4)
+        self.assertEqual(await self.connection.fetchval(
+            "SELECT count(*) FROM operations_rate_limit_windows WHERE actor_sha256=$1", actor
+        ), 1)
+
     async def test_legacy_only_upgrade_preserves_historical_rows_and_article_output(self):
         await self.connection.execute(legacy_base_sql())
         await self.connection.execute("""

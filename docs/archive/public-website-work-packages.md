@@ -2,7 +2,7 @@
 
 **Status: archived — superseded and incorporated.** This is the source
 proposal for the public website. Its reviewed, batch-aligned PW packages are
-now in the [current work packages](../work-packages.md); do not implement this
+in the [completed combined plan](batch-taxonomy-and-public-website-work-packages.md); do not implement this
 historical version directly.
 
 This plan adds a public, read-only

@@ -30,6 +30,7 @@ class SnapshotRequest:
     topic_prompt_version: str
     theme_prompt_version: str
     after_cutoff: datetime | None = None
+    source_cutoff: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,13 @@ class IdempotencyConflictError(ValueError):
     """The same key was reused for a different immutable snapshot request."""
 
 
+def compatible_representation(actual: str | None, expected: str) -> bool:
+    """The mixed policy combines the two supported input forms in one vector space."""
+    if expected == "mixed":
+        return actual in {"answer-only", "question-answer"}
+    return actual == expected
+
+
 # The cutoff is supplied by PostgreSQL inside the snapshot transaction. The
 # left joins deliberately constrain embeddings to the same cutoff: a vector
 # created later cannot be silently admitted to an earlier source snapshot.
@@ -62,7 +70,8 @@ _CANONICAL_EVIDENCE_SQL = """
 WITH canonical_targets AS (
     SELECT
         inputs.id AS original_input_id,
-        NULL::bigint AS segment_input_id
+        NULL::bigint AS segment_input_id,
+        inputs.created_at AS target_created_at
     FROM original_inputs AS inputs
     -- ready_for_analysis is the terminal evidence-preparation state. completed
     -- is retained solely for snapshots of installations created before that
@@ -81,7 +90,8 @@ WITH canonical_targets AS (
 
     SELECT
         inputs.id AS original_input_id,
-        segments.id AS segment_input_id
+        segments.id AS segment_input_id,
+        segments.created_at AS target_created_at
     FROM original_inputs AS inputs
     JOIN segment_inputs AS segments
       ON segments.original_input_id = inputs.id
@@ -96,7 +106,9 @@ SELECT
     embeddings.id AS embedding_id,
     embeddings.embedding_model,
     embeddings.embedding_representation,
-    vector_dims(embeddings.embedding)::integer AS embedding_dimension
+    vector_dims(embeddings.embedding)::integer AS embedding_dimension,
+    targets.target_created_at,
+    embeddings.created_at AS embedding_created_at
 FROM canonical_targets AS targets
 LEFT JOIN input_embeddings AS embeddings
   ON embeddings.created_at <= $1
@@ -144,6 +156,8 @@ def validate_snapshot_request(request: SnapshotRequest) -> None:
         raise ValueError("taxonomy snapshot provenance fields must be non-blank strings")
     if request.embedding_dimension <= 0:
         raise ValueError("embedding_dimension must be positive")
+    if request.source_cutoff is not None and request.source_cutoff.tzinfo is None:
+        raise ValueError("source_cutoff must include a timezone")
     if not isinstance(request.configuration, Mapping):
         raise ValueError("configuration must be an object")
     version = request.configuration.get("version")
@@ -168,6 +182,7 @@ def _same_request(row: asyncpg.Record, request: SnapshotRequest) -> bool:
         and row["topic_prompt_version"] == request.topic_prompt_version
         and row["theme_prompt_version"] == request.theme_prompt_version
         and row["embedding_dimension"] == request.embedding_dimension
+        and (request.source_cutoff is None or row["source_cutoff"] == request.source_cutoff)
     )
 
 
@@ -204,7 +219,7 @@ def _validation_counts(rows: list[asyncpg.Record], request: SnapshotRequest) -> 
         ),
         "representation_mismatch": sum(
             row["embedding_id"] is not None
-            and row["embedding_representation"] != request.embedding_representation
+            and not compatible_representation(row["embedding_representation"], request.embedding_representation)
             for row in rows
         ),
         "dimension_mismatch": sum(
@@ -296,7 +311,7 @@ async def create_taxonomy_snapshot(
                     )
                 result = _result_from_row(existing, queued=False, reused=True)
             else:
-                cutoff = await connection.fetchval("SELECT CURRENT_TIMESTAMP")
+                cutoff = request.source_cutoff or await connection.fetchval("SELECT CURRENT_TIMESTAMP")
                 evidence = await connection.fetch(
                     _CANONICAL_EVIDENCE_SQL, cutoff, request.after_cutoff
                 )

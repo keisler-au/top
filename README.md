@@ -84,6 +84,15 @@ the question and answer together; generic inputs retain answer-only behavior.
 
 Topics and themes are run-scoped revisions with durable stable identities.
 The sole published run is the source for all taxonomy readers and generation.
+Before first publication, the dashboard reports the newest candidate's
+processing, terminal failure, or failed quality gate with bounded status codes.
+Automatic replacement candidates in current source recluster all eligible
+canonical evidence, including generic and contextual answers embedded by one
+model and dimension. The current source and migrations 041–043 have fresh,
+populated-upgrade, and production-shaped Compose acceptance evidence. The
+affected local installation was recovered with the documented backup-first
+procedure on 2026-09-24; its failed first candidate remains quality-blocked and
+nonpublishable.
 
 ## Design principles
 
@@ -156,6 +165,15 @@ system's low-throughput workload.
 
 See [Operations](docs/operations.md) for bounded diagnostic queries and queue
 recovery guidance.
+
+The disposable automatic-taxonomy journey includes both evidence workers, a
+real Ollama embedding service, and the scheduler:
+
+```bash
+docker compose -f compose.taxonomy-journey.yaml up -d --build --wait
+docker compose -f compose.taxonomy-journey.yaml --profile acceptance run --rm journey
+docker compose -f compose.taxonomy-journey.yaml --profile acceptance down -v
+```
 
 ## Run the production stack with Docker Compose
 

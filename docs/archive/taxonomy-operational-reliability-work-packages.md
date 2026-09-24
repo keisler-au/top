@@ -3,8 +3,8 @@
 **Status: superseded.** This plan is retained as historical context for the
 candidate-taxonomy reliability work. It does not meet the current objective,
 because it explicitly retained the incremental taxonomy after production
-enablement. Use the [current work packages](../work-packages.md) for all new
-work.
+enablement. Its completed successors are listed in the
+[work-package archive](work-packages.md); do not use this plan for new work.
 
 This plan supersedes the historical batch-taxonomy proposal summarized in the
 [work-package archive](work-packages.md). It addresses the incomplete

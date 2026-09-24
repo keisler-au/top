@@ -82,6 +82,14 @@ The evidence queue has exactly two executable types: `eligibility_segmentation`
 and `embeddings`. The batch scheduler owns all taxonomy stages in its separate
 run-stage lease model.
 
+Automatic admission and snapshot creation use the same canonical selector.
+Replacement candidates freeze cumulative eligible evidence and recluster the
+complete set; the previous publication cutoff is audit and change-detection
+metadata, never a replacement-membership filter. Automatic `mixed`
+representation permits answer-only and question-answer vectors from one model
+and dimension. Decisions record historical post-cutoff or new cumulative
+membership so a crash replay preserves the frozen selection rule.
+
 ## Question context
 
 Question identity is normalized in `questions` as:
@@ -117,3 +125,8 @@ only in the immutable `taxonomy_legacy_archive` audit schema. The mutable
 legacy source tables and topic columns were destructively removed by migration
 `037_drop_legacy_taxonomy_schema.sql`; the archive is their only retained
 taxonomy history. See the [work-package archive](archive/work-packages.md).
+
+The dashboard and protected operations API share the current candidate-status
+rule. It reports a failed release attestation or terminal stage/run failure for
+the newest candidate and does not let an older failure mask newer processing.
+Publication still depends on the database-gated passing attestation.

@@ -29,9 +29,13 @@ short contract in the delivery guide. Boundary changes use the
 
 ## Current delivery pipeline
 
-There is no active work-package document. Current-state references describe
-automatic taxonomy delivery as implemented: eligible evidence creates a durable candidate, the
-scheduler processes it, and a passing immutable quality attestation promotes it
+There is no active work-package plan. The completed
+[taxonomy recovery and lifecycle repair plan](archive/taxonomy-recovery-and-lifecycle-repair-work-packages.md)
+records diagnosis, implementation, integrated verification, and the 2026-09-24
+backup-first recovery of the affected local installation.
+Current-state references describe automatic taxonomy delivery as implemented:
+eligible evidence creates a durable candidate, the scheduler processes it,
+and a passing immutable quality attestation promotes it
 without routine operator action. Batch taxonomy remains the sole production
 taxonomy; the legacy incremental system survives only as an immutable audit archive.
 The [baseline review](reviews/architecture-baseline.md#r2--high-delivery-risk-completion-records-disagree)
@@ -39,11 +43,11 @@ records conflicting completion metadata in the archived automatic-taxonomy
 plan. Its status must be reconciled against acceptance evidence before being
 used as proof of completion.
 
-The completed batch-taxonomy/public-website delivery plan, its source public
-website proposal, and the operational-reliability and question-context plans
-are archived. The legacy incremental runtime and source schema have been
-removed; its immutable archive remains audit-only. Archive documents are
-useful background, but are not implementation instructions.
+The completed taxonomy-recovery, batch-taxonomy/public-website, and
+question-context plans, plus superseded source proposals, are archived. The
+legacy incremental runtime and source schema have been removed; its immutable
+archive remains audit-only. Archive documents are useful background, but are
+not implementation instructions.
 
 ## Documentation maintenance process
 

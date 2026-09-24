@@ -18,6 +18,10 @@ npm run dev
 proxies `/api/*` to `API_BASE_URL`, which defaults to
 `http://localhost:8000`.
 
+The taxonomy verification workflow runs `npm test` and `npm run typecheck` for
+changes under `frontend/admin/`; the full automatic-taxonomy Compose journey is
+documented in [Operations](../../docs/operations.md#automatic-taxonomy-acceptance).
+
 Override either port when needed:
 
 ```bash
@@ -53,13 +57,18 @@ state so users start with a validated generation request.
 
 Taxonomy views and generation targets use the one published batch run. Before
 the first publication the dashboard renders a bounded first-run recovery
-message; a failed automatic gate renders a bounded quality-blocked message. It
+message; a terminal candidate failure renders a bounded failed-stage message,
+and a failed automatic gate renders a bounded quality-blocked message. Newer
+candidate progress takes precedence over stale failed history. It
 never falls back to retired incremental topic/theme data. Historical classifications are
 available only through the protected archive audit API, not this dashboard.
+First-run errors also distinguish a processing candidate, blocked automation,
+and an unavailable scheduler with bounded messages. The protected operations
+API holds the policy failure code; it is not included in public error text.
 
 ## Verification
 
 `npm test` runs the frontend unit tests. Cross-service lifecycle and taxonomy
 reliability work is tracked in the
-[documentation guide](../docs/README.md) and
-[work-package archive](../docs/archive/work-packages.md).
+[documentation guide](../../docs/README.md) and
+[work-package archive](../../docs/archive/work-packages.md).

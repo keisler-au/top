@@ -23,16 +23,19 @@ from triage_processor.taxonomy_snapshots import (
     _validation_counts,
 )
 
+MIN_CLUSTER_SIZE = 3
+MIN_SAMPLES = 2
+
 
 @dataclass(frozen=True)
 class AutomationPolicy:
     enabled: bool = True
     poll_interval: float = 10
-    minimum_evidence: int = 1
+    minimum_evidence: int = MIN_CLUSTER_SIZE
     quiet_seconds: float = 30
-    version: str = "taxonomy-automation-v1"
+    version: str = "taxonomy-automation-v2"
     embedding_model: str = "nomic-embed-text"
-    embedding_representation: str = "question-answer"
+    embedding_representation: str = "mixed"
     embedding_dimension: int = 768
     clustering_model: str = "hdbscan-0.8.44"
     topic_model: str = "qwen3:4b-instruct"
@@ -45,11 +48,11 @@ class AutomationPolicy:
         policy = cls(
             enabled=os.getenv("TAXONOMY_AUTOMATION_ENABLED", "true").strip().lower() == "true",
             poll_interval=float(os.getenv("TAXONOMY_POLL_INTERVAL", "10")),
-            minimum_evidence=int(os.getenv("TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE", "1")),
+            minimum_evidence=int(os.getenv("TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE", "3")),
             quiet_seconds=float(os.getenv("TAXONOMY_AUTOMATION_QUIET_SECONDS", "30")),
-            version=os.getenv("TAXONOMY_AUTOMATION_POLICY_VERSION", "taxonomy-automation-v1").strip(),
+            version=os.getenv("TAXONOMY_AUTOMATION_POLICY_VERSION", "taxonomy-automation-v2").strip(),
             embedding_model=os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text").strip(),
-            embedding_representation=os.getenv("TAXONOMY_EMBEDDING_REPRESENTATION", "question-answer").strip(),
+            embedding_representation=os.getenv("TAXONOMY_EMBEDDING_REPRESENTATION", "mixed").strip(),
             embedding_dimension=int(os.getenv("TAXONOMY_EMBEDDING_DIMENSION", "768")),
             clustering_model=os.getenv("TAXONOMY_CLUSTERING_MODEL", "hdbscan-0.8.44").strip(),
             topic_model=os.getenv("TAXONOMY_TOPIC_MODEL", os.getenv("LLM_MODEL", "qwen3:4b-instruct")).strip(),
@@ -61,7 +64,7 @@ class AutomationPolicy:
         return policy
 
     def validate(self) -> None:
-        if self.poll_interval <= 0 or self.minimum_evidence < 1 or self.quiet_seconds < 0:
+        if self.poll_interval <= 0 or self.minimum_evidence < MIN_CLUSTER_SIZE or self.quiet_seconds < 0:
             raise ValueError("taxonomy automation cadence, minimum evidence, and quiet interval are invalid")
         if self.embedding_dimension < 1:
             raise ValueError("TAXONOMY_EMBEDDING_DIMENSION must be positive")
@@ -72,12 +75,15 @@ class AutomationPolicy:
         )):
             raise ValueError("taxonomy automation provenance values must be non-empty")
 
-    def snapshot_request(self, *, idempotency_key: str, after_cutoff: datetime | None) -> SnapshotRequest:
+    def snapshot_request(
+        self, *, idempotency_key: str, after_cutoff: datetime | None,
+        source_cutoff: datetime | None = None,
+    ) -> SnapshotRequest:
         return SnapshotRequest(
             idempotency_key=idempotency_key,
             configuration={
                 "version": self.version,
-                "clustering": {"algorithm": self.clustering_model},
+                "clustering": {"algorithm": self.clustering_model, "min_cluster_size": MIN_CLUSTER_SIZE, "min_samples": MIN_SAMPLES},
                 "automation_policy_version": self.version,
             },
             embedding_model=self.embedding_model,
@@ -89,6 +95,7 @@ class AutomationPolicy:
             topic_prompt_version=self.topic_prompt_version,
             theme_prompt_version=self.theme_prompt_version,
             after_cutoff=after_cutoff,
+            source_cutoff=source_cutoff,
         )
 
 
@@ -140,37 +147,101 @@ async def _record_automation_block(pool: asyncpg.Pool, policy: AutomationPolicy,
         )
 
 
-_ELIGIBLE_SQL = """
-WITH canonical_targets AS (
-    SELECT inputs.id AS original_input_id, NULL::bigint AS segment_input_id,
-           inputs.created_at AS target_created_at
-    FROM original_inputs inputs
-    WHERE inputs.status IN ('ready_for_analysis','completed')
-      AND inputs.created_at > COALESCE($1, '-infinity'::timestamptz)
-      AND NOT EXISTS (SELECT 1 FROM segment_inputs segments WHERE segments.original_input_id=inputs.id)
-    UNION ALL
-    SELECT inputs.id, segments.id, segments.created_at
-    FROM original_inputs inputs JOIN segment_inputs segments ON segments.original_input_id=inputs.id
-    WHERE inputs.status IN ('ready_for_analysis','completed')
-      AND segments.created_at > COALESCE($1, '-infinity'::timestamptz)
-)
-SELECT count(*)::int AS evidence_count, max(GREATEST(target_created_at, embeddings.created_at)) AS evidence_cutoff
-FROM canonical_targets targets
-JOIN input_embeddings embeddings ON (
-    (targets.segment_input_id IS NULL AND embeddings.original_input_id=targets.original_input_id)
-    OR (targets.segment_input_id IS NOT NULL AND embeddings.segment_input_id=targets.segment_input_id)
-)
-WHERE embeddings.embedding_model=$2 AND embeddings.embedding_representation=$3
-  AND vector_dims(embeddings.embedding)::int=$4
-"""
+async def record_scheduler_heartbeat(pool: asyncpg.Pool, policy: AutomationPolicy) -> None:
+    """Give readers a bounded signal that scheduler polling is still alive."""
+    lease_seconds = max(60.0, policy.poll_interval * 3)
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """INSERT INTO taxonomy_automation_checkpoints(
+                   singleton,policy_version,last_scheduler_heartbeat_at,scheduler_heartbeat_expires_at)
+               VALUES(TRUE,$1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP + ($2 * INTERVAL '1 second'))
+               ON CONFLICT (singleton) DO UPDATE SET
+                   policy_version=EXCLUDED.policy_version,
+                   evaluation_failure_attempts=CASE WHEN taxonomy_automation_checkpoints.policy_version
+                       IS DISTINCT FROM EXCLUDED.policy_version THEN 0
+                       ELSE taxonomy_automation_checkpoints.evaluation_failure_attempts END,
+                   evaluation_next_attempt_at=CASE WHEN taxonomy_automation_checkpoints.policy_version
+                       IS DISTINCT FROM EXCLUDED.policy_version THEN NULL
+                       ELSE taxonomy_automation_checkpoints.evaluation_next_attempt_at END,
+                   last_failure_code=CASE WHEN taxonomy_automation_checkpoints.policy_version
+                       IS DISTINCT FROM EXCLUDED.policy_version THEN NULL
+                       ELSE taxonomy_automation_checkpoints.last_failure_code END,
+                   last_scheduler_heartbeat_at=EXCLUDED.last_scheduler_heartbeat_at,
+                   scheduler_heartbeat_expires_at=EXCLUDED.scheduler_heartbeat_expires_at""",
+            policy.version, lease_seconds,
+        )
+
+
+async def automation_evaluation_due(pool: asyncpg.Pool) -> bool:
+    async with pool.acquire() as connection:
+        return bool(await connection.fetchval(
+            """SELECT evaluation_failure_attempts < 3 AND
+                      (evaluation_next_attempt_at IS NULL OR evaluation_next_attempt_at <= CURRENT_TIMESTAMP)
+               FROM taxonomy_automation_checkpoints WHERE singleton"""
+        ))
+
+
+async def record_evaluation_failure(pool: asyncpg.Pool) -> int:
+    """Bound non-snapshot evaluation errors; a policy version change resets them."""
+    async with pool.acquire() as connection:
+        return await connection.fetchval(
+            """UPDATE taxonomy_automation_checkpoints
+               SET evaluation_failure_attempts=evaluation_failure_attempts+1,
+                   evaluation_next_attempt_at=CASE WHEN evaluation_failure_attempts+1 >= 3 THEN NULL
+                       ELSE CURRENT_TIMESTAMP + (LEAST(60, 5 * POWER(2, evaluation_failure_attempts)) * INTERVAL '1 second') END,
+                   last_failure_code='automation_error'
+               WHERE singleton RETURNING evaluation_failure_attempts"""
+        )
+
+
+async def clear_evaluation_failures(pool: asyncpg.Pool) -> None:
+    async with pool.acquire() as connection:
+        await connection.execute(
+            """UPDATE taxonomy_automation_checkpoints
+               SET evaluation_failure_attempts=0,evaluation_next_attempt_at=NULL
+               WHERE singleton AND evaluation_failure_attempts <> 0"""
+        )
+
+
+async def _record_reserved_exception(pool: asyncpg.Pool, decision_id: int) -> AutomationResult:
+    """Bound a reserved decision's failed attempts without storing error text."""
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            attempt = await connection.fetchval(
+                """UPDATE taxonomy_automation_decisions
+                   SET failure_attempts=failure_attempts+1,
+                       status=CASE WHEN failure_attempts+1 >= 3 THEN 'failed' ELSE 'reserved' END,
+                       failure_code=CASE WHEN failure_attempts+1 >= 3 THEN 'snapshot_error' ELSE 'snapshot_retrying' END,
+                       next_attempt_at=CASE WHEN failure_attempts+1 >= 3 THEN NULL
+                           ELSE CURRENT_TIMESTAMP + (LEAST(60, 5 * POWER(2, failure_attempts)) * INTERVAL '1 second') END
+                   WHERE id=$1 AND status='reserved' RETURNING failure_attempts""",
+                decision_id,
+            )
+            if attempt is None:
+                return AutomationResult("blocked", reason="snapshot_error")
+            code = "snapshot_error" if attempt >= 3 else "snapshot_retrying"
+            await connection.execute(
+                "UPDATE taxonomy_automation_checkpoints SET last_failure_code=$1 WHERE singleton",
+                code,
+            )
+    return AutomationResult("blocked" if attempt >= 3 else "waiting", reason=code)
 
 
 async def _finish_reserved_decision(pool: asyncpg.Pool, policy: AutomationPolicy, decision: asyncpg.Record) -> AutomationResult:
+    if decision["next_attempt_at"] is not None:
+        async with pool.acquire() as connection:
+            retry_due = await connection.fetchval(
+                "SELECT CURRENT_TIMESTAMP >= $1", decision["next_attempt_at"]
+            )
+        if not retry_due:
+            return AutomationResult("waiting", reason="snapshot_retrying")
     try:
         result = await create_taxonomy_snapshot(
             pool, policy.snapshot_request(
                 idempotency_key=decision["idempotency_key"],
-                after_cutoff=decision["predecessor_cutoff"],
+                after_cutoff=(decision["predecessor_cutoff"]
+                              if decision["membership_mode"] == "post_cutoff" else None),
+                source_cutoff=decision["snapshot_cutoff"],
             ),
         )
     except SnapshotValidationError:
@@ -184,22 +255,29 @@ async def _finish_reserved_decision(pool: asyncpg.Pool, policy: AutomationPolicy
                     "UPDATE taxonomy_automation_checkpoints SET last_failure_code='snapshot_invalid' WHERE singleton"
                 )
         return AutomationResult("blocked", reason="snapshot_invalid")
-    async with pool.acquire() as connection:
-        async with connection.transaction():
-            await connection.execute(
-                """UPDATE taxonomy_automation_decisions SET status='snapshotted', taxonomy_run_id=$2
-                   WHERE id=$1 AND status='reserved'""", decision["id"], result.id,
-            )
-            await connection.execute(
-                """UPDATE taxonomy_automation_checkpoints
-                   SET policy_version=$1,last_considered_cutoff=$2,last_failure_code=NULL WHERE singleton""",
-                policy.version, result.source_cutoff,
-            )
+    except Exception:
+        return await _record_reserved_exception(pool, decision["id"])
+    try:
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute(
+                    """UPDATE taxonomy_automation_decisions SET status='snapshotted', taxonomy_run_id=$2,
+                           failure_code=NULL,next_attempt_at=NULL
+                       WHERE id=$1 AND status='reserved'""", decision["id"], result.id,
+                )
+                await connection.execute(
+                    """UPDATE taxonomy_automation_checkpoints
+                       SET policy_version=$1,last_considered_cutoff=$2,last_failure_code=NULL WHERE singleton""",
+                    policy.version, result.source_cutoff,
+                )
+    except Exception:
+        return await _record_reserved_exception(pool, decision["id"])
     return AutomationResult("created" if not result.reused else "recovered", result.id)
 
 
 async def evaluate_automation(pool: asyncpg.Pool, policy: AutomationPolicy) -> AutomationResult:
     """Reserve or replay one policy decision, then use the normal snapshot path."""
+    policy.validate()
     if not policy.enabled:
         await _record_automation_block(pool, policy, "policy_disabled")
         return AutomationResult("disabled", reason="policy_disabled")
@@ -223,24 +301,6 @@ async def evaluate_automation(pool: asyncpg.Pool, policy: AutomationPolicy) -> A
         await _enqueue_if_possible(pool, row["id"])
     await promote_automatic_candidates(pool, policy)
     async with pool.acquire() as connection:
-        blocked = await connection.fetchval(
-            """SELECT CASE
-                  WHEN EXISTS (
-                    SELECT 1 FROM taxonomy_runs run
-                    JOIN taxonomy_automation_decisions decision ON decision.taxonomy_run_id=run.id
-                    JOIN taxonomy_release_attestations gate ON gate.taxonomy_run_id=run.id AND NOT gate.gate_passed
-                    WHERE run.status='ready_for_review' AND decision.idempotency_key LIKE 'automatic:%'
-                  ) THEN 'quality_gate_failed'
-                  WHEN EXISTS (
-                    SELECT 1 FROM taxonomy_runs run
-                    JOIN taxonomy_automation_decisions decision ON decision.taxonomy_run_id=run.id
-                    WHERE run.status='failed' AND decision.idempotency_key LIKE 'automatic:%'
-                  ) THEN 'candidate_failed'
-                  END"""
-        )
-    if blocked:
-        await _record_automation_block(pool, policy, blocked)
-    async with pool.acquire() as connection:
         async with connection.transaction():
             await connection.execute(
                 "INSERT INTO taxonomy_automation_checkpoints(singleton,policy_version) VALUES(TRUE,$1) ON CONFLICT DO NOTHING",
@@ -261,68 +321,82 @@ async def evaluate_automation(pool: asyncpg.Pool, policy: AutomationPolicy) -> A
                     "SELECT * FROM taxonomy_automation_checkpoints WHERE singleton"
                 )
             active = await connection.fetchval(
-                "SELECT EXISTS (SELECT 1 FROM taxonomy_runs WHERE status IN ('pending','running','ready_for_review'))"
+                "SELECT EXISTS (SELECT 1 FROM taxonomy_runs WHERE status IN ('pending','running'))"
             )
             if active:
+                await connection.execute(
+                    "UPDATE taxonomy_automation_checkpoints SET last_failure_code=NULL WHERE singleton"
+                )
                 return AutomationResult("waiting", reason="candidate_active")
-            evidence = await connection.fetchrow(
-                _ELIGIBLE_SQL, checkpoint["last_published_cutoff"], policy.embedding_model,
-                policy.embedding_representation, policy.embedding_dimension,
-            )
-            if evidence["evidence_count"] < policy.minimum_evidence:
+            snapshot_cutoff = await connection.fetchval("SELECT CURRENT_TIMESTAMP")
+            # Admission validates the same complete canonical set that will be
+            # frozen. A publication cutoff can never filter replacement members.
+            rows = await connection.fetch(_CANONICAL_EVIDENCE_SQL, snapshot_cutoff, None)
+            request = policy.snapshot_request(idempotency_key="admission", after_cutoff=None)
+            counts = _validation_counts(rows, request)
+            if any(counts[name] for name in ("model_mismatch", "representation_mismatch", "dimension_mismatch")):
+                await connection.execute("UPDATE taxonomy_automation_checkpoints SET last_failure_code='snapshot_invalid' WHERE singleton")
+                return AutomationResult("blocked", reason="snapshot_invalid")
+            if counts["missing_embedding"]:
+                failed_preparation = await connection.fetchval(
+                    """SELECT EXISTS (SELECT 1 FROM worker_jobs job
+                       JOIN original_inputs input ON input.id=job.original_input_id
+                       WHERE job.status='failed' AND input.status IN ('ready_for_analysis','completed'))"""
+                )
+                code = "evidence_failed" if failed_preparation else None
+                await connection.execute(
+                    "UPDATE taxonomy_automation_checkpoints SET last_failure_code=$1 WHERE singleton", code
+                )
+                return AutomationResult("blocked" if code else "waiting", reason=code or "preparing_evidence")
+            if counts["canonical_evidence"] < policy.minimum_evidence:
+                await connection.execute("UPDATE taxonomy_automation_checkpoints SET last_failure_code=NULL WHERE singleton")
                 return AutomationResult("waiting", reason="minimum_evidence")
-            cutoff = evidence["evidence_cutoff"]
+            cutoff = max(
+                max(row["target_created_at"], row["embedding_created_at"])
+                for row in rows
+            )
             quiet = await connection.fetchval(
                 "SELECT CURRENT_TIMESTAMP - $1 >= ($2 * INTERVAL '1 second')", cutoff, policy.quiet_seconds
             )
             if not quiet:
+                await connection.execute("UPDATE taxonomy_automation_checkpoints SET last_failure_code=NULL WHERE singleton")
                 return AutomationResult("waiting", reason="debouncing")
-            # Admission and snapshots must use the same canonical membership.
-            # Wait for missing vectors instead of permanently poisoning a key
-            # while preparation is still completing.
-            snapshot_cutoff = await connection.fetchval("SELECT CURRENT_TIMESTAMP")
-            rows = await connection.fetch(_CANONICAL_EVIDENCE_SQL, snapshot_cutoff, checkpoint["last_published_cutoff"])
-            request = policy.snapshot_request(idempotency_key="admission", after_cutoff=checkpoint["last_published_cutoff"])
-            counts = _validation_counts(rows, request)
-            if counts["missing_embedding"]:
-                return AutomationResult("waiting", reason="preparing_evidence")
-            if any(counts[name] for name in ("model_mismatch", "representation_mismatch", "dimension_mismatch")):
-                await connection.execute("UPDATE taxonomy_automation_checkpoints SET last_failure_code='snapshot_invalid' WHERE singleton")
-                return AutomationResult("blocked", reason="snapshot_invalid")
             fingerprint = _source_hash(rows)
             key = f"automatic:{policy.version}:{fingerprint}"
-            prior = await connection.fetchrow(
-                """SELECT run.id, run.status FROM taxonomy_runs run
-                   JOIN taxonomy_automation_decisions decision ON decision.taxonomy_run_id=run.id
-                   WHERE run.source_snapshot_sha256=$1 AND decision.policy_version=$2
-                     AND decision.idempotency_key LIKE 'automatic:%'
-                   ORDER BY run.id DESC LIMIT 1""", fingerprint, policy.version,
-            )
-            if prior is not None and prior["status"] in {"failed", "rejected"}:
-                return AutomationResult("blocked", prior["id"], "candidate_failed")
             decision = await connection.fetchrow(
                 "SELECT * FROM taxonomy_automation_decisions WHERE idempotency_key=$1 FOR UPDATE", key
             )
             if decision is not None and decision["status"] == "failed":
+                await connection.execute(
+                    "UPDATE taxonomy_automation_checkpoints SET last_failure_code=$1 WHERE singleton",
+                    decision["failure_code"],
+                )
                 return AutomationResult("blocked", decision["taxonomy_run_id"], decision["failure_code"])
             if decision is not None and decision["status"] == "snapshotted":
-                run_status = await connection.fetchval(
-                    "SELECT status FROM taxonomy_runs WHERE id=$1", decision["taxonomy_run_id"]
+                run = await connection.fetchrow(
+                    """SELECT run.status, gate.gate_passed FROM taxonomy_runs run
+                       LEFT JOIN taxonomy_release_attestations gate ON gate.taxonomy_run_id=run.id
+                       WHERE run.id=$1""", decision["taxonomy_run_id"],
                 )
-                # Never turn a terminal failed/rejected candidate into an
-                # implicit retry.  The protected schedule endpoint is the
-                # explicit recovery action for that exact frozen snapshot.
+                code = (
+                    "quality_gate_failed" if run["gate_passed"] is False else
+                    "candidate_failed" if run["status"] in {"failed", "rejected"} else None
+                )
+                await connection.execute(
+                    "UPDATE taxonomy_automation_checkpoints SET last_failure_code=$1 WHERE singleton", code
+                )
                 return AutomationResult(
-                    "blocked" if run_status in {"failed", "rejected"} else "recovered",
+                    "blocked" if code else "waiting",
                     decision["taxonomy_run_id"],
-                    "candidate_failed" if run_status == "failed" else None,
+                    code or "unchanged_evidence",
                 )
             if decision is None:
                 decision = await connection.fetchrow(
                     """INSERT INTO taxonomy_automation_decisions
-                       (idempotency_key,policy_version,evidence_cutoff,predecessor_cutoff,status)
-                       VALUES($1,$2,$3,$4,'reserved') RETURNING *""",
-                    key, policy.version, cutoff, checkpoint["last_published_cutoff"],
+                       (idempotency_key,policy_version,evidence_cutoff,predecessor_cutoff,
+                        membership_mode,snapshot_cutoff,status)
+                       VALUES($1,$2,$3,$4,'cumulative',$5,'reserved') RETURNING *""",
+                    key, policy.version, cutoff, checkpoint["last_published_cutoff"], snapshot_cutoff,
                 )
     return await _finish_reserved_decision(pool, policy, decision)
 

@@ -78,18 +78,60 @@ TAXONOMY_RETRY_BASE_SECONDS=5
 TAXONOMY_RETRY_MAX_SECONDS=300
 TAXONOMY_SCHEDULER_CONFIGURATION_VERSION=taxonomy-scheduler-v1
 TAXONOMY_AUTOMATION_ENABLED=true
-TAXONOMY_AUTOMATION_POLICY_VERSION=taxonomy-automation-v1
-TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE=1
+TAXONOMY_AUTOMATION_POLICY_VERSION=taxonomy-automation-v2
+TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE=3
 TAXONOMY_AUTOMATION_QUIET_SECONDS=30
+TAXONOMY_EMBEDDING_REPRESENTATION=mixed
 ```
 
 Set `TAXONOMY_AUTOMATION_ENABLED=false` to pause new automatic snapshots and
 promotion without withdrawing an existing publication. `GET /operations/summary`
 reports only bounded automation state, policy version, and failure code.
+The automatic policy's clustering configuration uses `min_cluster_size=3` and
+`min_samples=2`; minimum evidence must be at least three. `mixed` admits only
+answer-only and question-answer embeddings with the configured model and
+dimension. Replacements snapshot all eligible canonical evidence through the
+new cutoff and recluster it. The prior publication stays served until a
+passing replacement completes the database gate.
+
+Migration 042 records decision membership mode, bounded snapshot retries,
+and scheduler heartbeat/evaluation-failure state. Existing reserved
+post-cutoff decisions replay with their historical selector; new decisions
+use cumulative membership. Snapshot creation or decision-link errors retry
+at most three times with backoff, then report `snapshot_error` until evidence
+or policy changes. Other automation evaluation errors stop after three
+attempts for one policy version and report `automation_error`. Correct the
+cause and advance `TAXONOMY_AUTOMATION_POLICY_VERSION` to reset that terminal
+counter. An expired scheduler heartbeat reports unavailable status to
+first-run readers. None of these transitions changes frozen runs or failed
+attestations.
+
+Migration 043 corrects the operations API's fixed rate-limit window key: it
+uses the same whole-window floor for every concurrent request. It preserves
+existing counters and operator authentication. Apply 042 and 043 with the
+matching application image before relying on the new TR-2 diagnostics.
+
+### Automatic-taxonomy acceptance
+
+The disposable full-journey stack exercises the API, both evidence workers,
+real Ollama embeddings, the taxonomy scheduler, every durable taxonomy stage,
+the immutable release gate, and automatic publication. Structured chat is a
+deterministic fixture so the check measures lifecycle and protocol wiring
+rather than model sampling:
+
+```bash
+docker compose -f compose.taxonomy-journey.yaml up -d --build --wait
+docker compose -f compose.taxonomy-journey.yaml --profile acceptance run --rm journey
+docker compose -f compose.taxonomy-journey.yaml --profile acceptance down -v
+```
+
+The stack uses a tmpfs database and its own Ollama model volume. The final
+command deletes both. It never mounts the application PostgreSQL volume.
 
 `TAXONOMY_POLL_INTERVAL` is the candidate-stage scheduling cadence. Only one
 pending or processing `taxonomy_run_jobs` row is permitted by the database;
-the scheduler processes that durable candidate and never publishes it. Compose
+the scheduler processes that durable candidate and automatically publishes it
+only after a passing release attestation. Compose
 allows two minutes for an in-flight leased stage to finish and release its
 connection on shutdown. The scheduler health probe fails closed when the
 durable-stage migration marker is missing, pgvector is unavailable, the
@@ -99,9 +141,10 @@ claim scheduled work.
 ## Taxonomy release gate
 
 The quality stage is the sole writer of a release decision. Its current policy
-version is `taxonomy-release-gate-v1`: snapshot completeness must be 1.0,
+version is `taxonomy-release-gate-v2`: snapshot completeness must be 1.0,
 noise must not exceed 0.40, topic acceptance must be at least 0.80, and
-duplicate-topic rate must not exceed 0.10. It records aggregate metrics,
+duplicate-topic rate must not exceed 0.10; at least one reconciled theme is
+required. It records aggregate metrics,
 thresholds, failures, and a hash binding those inputs in one immutable
 `taxonomy_release_attestations` row per run. It never reads raw evidence into
 the attestation and accepts no operator- or API-supplied quality signals.
@@ -135,6 +178,15 @@ docker compose exec taxonomy-scheduler \
 docker compose exec taxonomy-scheduler \
   python -m triage_processor.taxonomy_scheduler --cancel-stage-id 123
 ```
+
+Migration 041 reconciles older candidates whose terminal failed or cancelled
+stage left the run and singleton job active. It marks those runs/jobs failed
+without changing frozen stage results, release attestations, or publication.
+After deployment, a failed release gate remains nonpublishable. The dashboard
+reports the latest candidate's bounded first-run, terminal-failure, or
+quality-blocked state. Protected `/operations/summary` uses that same latest
+candidate status; a newer active candidate takes precedence over stale failed
+history. Check the candidate and stage IDs before an explicit retry.
 
 ## Google Sheets importer
 
@@ -170,6 +222,19 @@ legacy archive. `verify-legacy-archive-restore.sh` compares the public
 projection and theme-snapshot counts as part of its isolated restore check.
 Do not reconstruct public data from the current taxonomy: approval snapshots
 are immutable, and taxonomy lineage changes never rewrite them.
+
+### 2026-09-23 taxonomy recovery
+
+The affected local PostgreSQL container did not exit because of a PostgreSQL
+error. Docker recorded a stale Docker Desktop/WSL bind source for
+`/docker-entrypoint-initdb.d/01-enable-pgvector.sql`; recreating the container
+from the current Compose file was required. A read-only populated clone first
+verified the complete 040-to-043 migration and lifecycle repair. The affected
+installation was then backed up and recovered on 2026-09-24 with matching
+rebuilt images; its failed attestation remains nonpassing and no taxonomy was
+published. The retained physical backup is
+`triage-postgres-pre-recovery-20260923`. See the exact commands, evidence, and
+stop conditions in the [dated recovery verification](reviews/taxonomy-recovery-verification-2026-09-23.md).
 
 ### Legacy taxonomy archive
 

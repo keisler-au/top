@@ -1,0 +1,170 @@
+# Disposable, production-shaped automatic-taxonomy acceptance stack.
+# It uses real Ollama embeddings and a deterministic chat fixture so the gate
+# verifies application lifecycle/wiring rather than chat-model sampling.
+name: triage-taxonomy-journey
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: triage_journey
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: journey-only
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./infrastructure/postgres/migrations:/docker-entrypoint-initdb.d/migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d triage_journey"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+
+  migrate:
+    image: pgvector/pgvector:pg17
+    environment:
+      PGHOST: postgres
+      PGDATABASE: triage_journey
+      PGUSER: postgres
+      PGPASSWORD: journey-only
+    command: ["/bin/sh", "/postgres/run-migrations.sh"]
+    volumes:
+      - ./infrastructure/postgres:/postgres:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - taxonomy_journey_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+
+  ollama-init:
+    image: ollama/ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull nomic-embed-text"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  chat-fixture:
+    build: ./backend
+    command: ["python", "/app/tests/fixtures/structured_chat_stub.py"]
+    volumes:
+      - ./backend/tests:/app/tests:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 1s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://postgres:journey-only@postgres:5432/triage_journey
+      PUBLIC_SITE_ORIGIN: https://journey.example.test
+      PUBLIC_SITE_NAME: Taxonomy journey
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  eligibility-segmentation:
+    build: ./backend
+    command: ["python", "-m", "triage_processor.workers.eligibility_segmentation"]
+    environment: &worker-environment
+      DATABASE_URL: postgresql://postgres:journey-only@postgres:5432/triage_journey
+      LLM_BASE_URL: http://chat-fixture:8080/v1
+      LLM_MODEL: deterministic-journey-fixture
+      WORKER_POLL_INTERVAL: "0.2"
+      QUEUE_RETRY_BASE_SECONDS: "0.2"
+      QUEUE_RETRY_MAX_SECONDS: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      chat-fixture:
+        condition: service_healthy
+
+  embeddings:
+    build: ./backend
+    command: ["python", "-m", "triage_processor.workers.embeddings"]
+    environment:
+      DATABASE_URL: postgresql://postgres:journey-only@postgres:5432/triage_journey
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_EMBEDDING_MODEL: nomic-embed-text
+      OLLAMA_EMBEDDING_DIMENSIONS: "768"
+      OLLAMA_EMBEDDING_BATCH_SIZE: "16"
+      WORKER_POLL_INTERVAL: "0.2"
+      QUEUE_RETRY_BASE_SECONDS: "0.2"
+      QUEUE_RETRY_MAX_SECONDS: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama-init:
+        condition: service_completed_successfully
+
+  taxonomy-scheduler:
+    build: ./backend
+    command: ["python", "-m", "triage_processor.taxonomy_scheduler"]
+    environment:
+      <<: *worker-environment
+      TAXONOMY_POLL_INTERVAL: "0.2"
+      TAXONOMY_LEASE_SECONDS: "60"
+      TAXONOMY_RETRY_BASE_SECONDS: "0.2"
+      TAXONOMY_RETRY_MAX_SECONDS: "1"
+      TAXONOMY_AUTOMATION_POLICY_VERSION: taxonomy-automation-v2
+      TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE: "3"
+      TAXONOMY_AUTOMATION_QUIET_SECONDS: "0"
+      TAXONOMY_EMBEDDING_REPRESENTATION: mixed
+      TAXONOMY_EMBEDDING_DIMENSION: "768"
+    healthcheck:
+      test: ["CMD", "python", "-m", "triage_processor.taxonomy_scheduler", "--healthcheck"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      chat-fixture:
+        condition: service_healthy
+
+  journey:
+    profiles: ["acceptance"]
+    build: ./backend
+    command: ["python", "/app/tests/acceptance_taxonomy_journey.py"]
+    environment:
+      DATABASE_URL: postgresql://postgres:journey-only@postgres:5432/triage_journey
+      JOURNEY_API_BASE_URL: http://api:8000
+    volumes:
+      - ./backend/tests:/app/tests:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      eligibility-segmentation:
+        condition: service_started
+      embeddings:
+        condition: service_started
+      taxonomy-scheduler:
+        condition: service_healthy
+
+volumes:
+  taxonomy_journey_models:

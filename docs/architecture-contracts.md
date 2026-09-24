@@ -50,6 +50,10 @@ embedding model/representation/dimension, and configuration/prompt provenance.
 Never silently combine incompatible vectors or change frozen membership.
 Reuse `create_taxonomy_snapshot` and published database readers. Any additional
 selector must demonstrate the same canonical semantics with shared fixtures.
+For automatic runs, `mixed` representation admits only `answer-only` and
+`question-answer` vectors from one embedding model and dimension; each vector
+retains its original representation. Manual exact-representation snapshots
+remain exact. See [ADR-0002](decisions/0002-mixed-answer-embeddings.md).
 
 ## AC-03 — Taxonomy visibility and publication
 
@@ -67,8 +71,16 @@ unchanged failed evidence must not cause an unbounded automatic creation loop.
 
 Each multi-query reader must preserve a consistent published-run view using
 the existing transaction/read semantics or an explicitly captured run ID.
-Changing cumulative versus post-cutoff evidence membership is a product/data
-decision, not an incidental optimization; describe coverage effects first.
+Automatic replacement candidates select cumulative eligible canonical evidence
+through their frozen snapshot cutoff and validate every selected embedding. The
+previous publication cutoff can trigger a new candidate, but cannot limit its
+membership. Each replacement reclusters that full set so current topics are
+based on the latest frozen embedding clusters. Preserve the prior publication
+until the replacement passes the existing gate. See
+[ADR-0001](decisions/0001-cumulative-taxonomy-replacement.md). The recovered
+local runtime and the production-shaped acceptance stack implement this
+contract; each external deployment still requires its own backup and migration
+evidence.
 
 ## AC-04 — Durable work and transactions
 

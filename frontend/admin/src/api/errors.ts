@@ -44,6 +44,15 @@ export function userFacingError(error: unknown): string {
     if (code === "taxonomy_first_run") {
       return "No taxonomy has been published yet. Eligible evidence and a successful automatic candidate are required.";
     }
+    if (code === "taxonomy_candidate_processing") {
+      return "The first taxonomy candidate is processing. Check its progress in operations.";
+    }
+    if (code === "taxonomy_automation_blocked") {
+      return "Automatic taxonomy creation is blocked. Check the bounded failure code in operations.";
+    }
+    if (code === "taxonomy_scheduler_unavailable") {
+      return "The taxonomy scheduler is unavailable. Check its service and database connection.";
+    }
     if (code === "taxonomy_candidate_failed") {
       return "Taxonomy processing failed. An operator must inspect the failed stage and retry it after correcting the cause.";
     }

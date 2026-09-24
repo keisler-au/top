@@ -13,7 +13,10 @@ import httpx
 from triage_processor.api.routes import articles, dashboard, generation, form_sources, inputs, operations, taxonomy_review, public_site
 from triage_processor.articles import canonical_theme_ids
 from triage_processor.taxonomy_snapshots import SnapshotRequest, create_taxonomy_snapshot
-from triage_processor.taxonomy_automation import AutomationPolicy, evaluate_automation, promote_automatic_candidates
+from triage_processor.taxonomy_automation import (
+    AutomationPolicy, automation_evaluation_due, evaluate_automation,
+    promote_automatic_candidates, record_evaluation_failure, record_scheduler_heartbeat,
+)
 from triage_processor.taxonomy_stage_quality import (
     THRESHOLD_VERSION,
     attestation_input_sha256,
@@ -22,6 +25,7 @@ from triage_processor.taxonomy_stage_quality import (
 from triage_processor.taxonomy_stages import claim_next_stage, complete_stage, fail_stage, retry_stage, cancel_stage
 from triage_processor.taxonomy_scheduler import process_stage
 from triage_processor.taxonomy_clustering import ClusterPlan, CandidateCluster
+from triage_processor.taxonomy_clustering import load_run_evidence
 from triage_processor.workers.article_generation import claim_job, process_job
 
 DSN = os.environ.get("TRIAGE_TEST_DATABASE_URL")
@@ -374,6 +378,10 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
             VALUES(CURRENT_TIMESTAMP,repeat('d',64),'{}'::jsonb,repeat('e',64),
               'fixture','fixture',2,'fixture','fixture','fixture','fixture','fixture') RETURNING id
         """)
+        await self.admin.execute("""
+            INSERT INTO taxonomy_automation_decisions(idempotency_key,policy_version,evidence_cutoff,status,taxonomy_run_id)
+            VALUES('automatic:status-policy-v1:candidate','status-policy-v1',CURRENT_TIMESTAMP,'snapshotted',$1)
+        """, candidate)
         running = await self.get('/operations/summary')
         self.assertEqual(running['taxonomy_runs']['automation_state'], 'running_candidate')
         await self.admin.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1", candidate)
@@ -385,6 +393,126 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         blocked = await self.get('/operations/summary')
         self.assertEqual(blocked['taxonomy_runs']['automation_state'], 'blocked_by_quality')
         self.assertNotIn('fixture_failure', str(blocked))
+
+        # A newer active candidate takes precedence over the old failed gate.
+        successor = await self.admin.fetchval("""
+            INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,configuration,configuration_sha256,
+              embedding_model,embedding_representation,embedding_dimension,clustering_model,topic_model,theme_model,topic_prompt_version,theme_prompt_version)
+            VALUES(CURRENT_TIMESTAMP,repeat('1',64),'{}'::jsonb,repeat('2',64),
+              'fixture','fixture',2,'fixture','fixture','fixture','fixture','fixture') RETURNING id
+        """)
+        await self.admin.execute("""
+            INSERT INTO taxonomy_automation_decisions(idempotency_key,policy_version,evidence_cutoff,status,taxonomy_run_id)
+            VALUES('automatic:status-policy-v1:successor','status-policy-v1',CURRENT_TIMESTAMP,'snapshotted',$1)
+        """, successor)
+        self.assertEqual((await self.get('/operations/summary'))['taxonomy_runs']['automation_state'], 'running_candidate')
+        await self.admin.execute("UPDATE taxonomy_runs SET status='failed',error_summary='fixture' WHERE id=$1", successor)
+        self.assertEqual((await self.get('/operations/summary'))['taxonomy_runs']['automation_state'], 'blocked_by_failure')
+        # A rollback can make the newest historical run superseded while an
+        # older run is published; this is no longer active candidate work.
+        superseded = await self.admin.fetchval("""
+            INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,configuration,configuration_sha256,
+              embedding_model,embedding_representation,embedding_dimension,clustering_model,topic_model,theme_model,
+              topic_prompt_version,theme_prompt_version,status,completed_at,published_at,decision_by,decision_at)
+            VALUES(CURRENT_TIMESTAMP,repeat('8',64),'{}'::jsonb,repeat('9',64),
+              'fixture','fixture',2,'fixture','fixture','fixture','fixture','fixture',
+              'superseded',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,'fixture',CURRENT_TIMESTAMP)
+            RETURNING id
+        """)
+        await self.admin.execute("""
+            INSERT INTO taxonomy_automation_decisions(idempotency_key,policy_version,evidence_cutoff,status,taxonomy_run_id)
+            VALUES('automatic:status-policy-v1:rolled-back','status-policy-v1',CURRENT_TIMESTAMP,'snapshotted',$1)
+        """, superseded)
+        self.assertEqual((await self.get('/operations/summary'))['taxonomy_runs']['automation_state'], 'automatically_published')
+
+    async def test_first_run_status_tracks_newest_candidate_and_preserves_bounded_errors(self):
+        # The shared fixture starts published. Recreate a pre-publication view
+        # only inside this disposable schema; production transitions stay gated.
+        async with self.admin.transaction():
+            await self.admin.execute("SELECT set_config('taxonomy.rollback','on',true)")
+            await self.admin.execute("UPDATE taxonomy_runs SET status='superseded' WHERE id=1")
+        self.assertEqual((await self.client.get('/dashboard/summary')).json()['detail']['code'], 'taxonomy_scheduler_unavailable')
+        failed = await self.admin.fetchval("""
+            INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,configuration,configuration_sha256,
+              embedding_model,embedding_representation,embedding_dimension,clustering_model,topic_model,theme_model,topic_prompt_version,theme_prompt_version)
+            VALUES(CURRENT_TIMESTAMP,repeat('3',64),'{}'::jsonb,repeat('4',64),
+              'fixture','fixture',2,'fixture','fixture','fixture','fixture','fixture') RETURNING id
+        """)
+        await self.admin.execute("UPDATE taxonomy_runs SET status='failed',error_summary='private failure' WHERE id=$1", failed)
+        response = await self.client.get('/dashboard/summary')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['detail']['code'], 'taxonomy_candidate_failed')
+        self.assertNotIn('private failure', response.text)
+        self.assertEqual((await self.get('/operations/summary'))['taxonomy_runs']['automation_state'], 'blocked_by_failure')
+        active = await self.admin.fetchval("""
+            INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,configuration,configuration_sha256,
+              embedding_model,embedding_representation,embedding_dimension,clustering_model,topic_model,theme_model,topic_prompt_version,theme_prompt_version)
+            VALUES(CURRENT_TIMESTAMP,repeat('5',64),'{}'::jsonb,repeat('6',64),
+              'fixture','fixture',2,'fixture','fixture','fixture','fixture','fixture') RETURNING id
+        """)
+        self.assertEqual((await self.client.get('/dashboard/summary')).json()['detail']['code'], 'taxonomy_candidate_processing')
+        self.assertEqual((await self.get('/operations/summary'))['taxonomy_runs']['automation_state'], 'running_candidate')
+        await self.admin.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1", active)
+        await self.admin.execute("""
+            INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,thresholds,threshold_version,gate_passed,failures,input_sha256)
+            VALUES($1,'{}'::jsonb,'{}'::jsonb,'fixture',FALSE,ARRAY['private_gate_failure'],repeat('7',64))
+        """, active)
+        response = await self.client.get('/dashboard/summary')
+        self.assertEqual(response.json()['detail']['code'], 'taxonomy_quality_blocked')
+        self.assertNotIn('private_gate_failure', response.text)
+        self.assertEqual((await self.get('/operations/summary'))['taxonomy_runs']['automation_state'], 'blocked_by_quality')
+
+    async def test_first_run_automation_policy_and_scheduler_failures_are_bounded(self):
+        async with self.admin.transaction():
+            await self.admin.execute("SELECT set_config('taxonomy.rollback','on',true)")
+            await self.admin.execute("UPDATE taxonomy_runs SET status='superseded' WHERE id=1")
+        policy = AutomationPolicy(version="status-fixture-v2")
+        await record_scheduler_heartbeat(self.pool, policy)
+        await self.admin.execute("""
+            UPDATE taxonomy_automation_checkpoints SET last_failure_code='policy_disabled'
+            WHERE singleton
+        """)
+        self.assertEqual((await self.client.get('/dashboard/summary')).json()['detail']['code'],
+                         'taxonomy_automation_blocked')
+        self.assertEqual((await self.get('/operations/summary'))['taxonomy_runs']['automation_state'],
+                         'blocked_by_policy')
+        await self.admin.execute("""
+            UPDATE taxonomy_automation_checkpoints SET last_failure_code='snapshot_invalid'
+            WHERE singleton
+        """)
+        self.assertEqual((await self.get('/operations/summary'))['taxonomy_runs']['automation_state'],
+                         'blocked_by_failure')
+        await self.admin.execute("""
+            UPDATE taxonomy_automation_checkpoints SET last_failure_code=NULL,
+              scheduler_heartbeat_expires_at=CURRENT_TIMESTAMP - INTERVAL '1 second'
+            WHERE singleton
+        """)
+        self.assertEqual((await self.client.get('/dashboard/summary')).json()['detail']['code'],
+                         'taxonomy_scheduler_unavailable')
+        self.assertEqual((await self.get('/operations/summary'))['taxonomy_runs']['automation_state'],
+                         'scheduler_unavailable')
+
+    async def test_scheduler_evaluation_errors_stop_after_three_attempts_until_policy_changes(self):
+        policy = AutomationPolicy(version="scheduler-errors-v2")
+        await record_scheduler_heartbeat(self.pool, policy)
+        self.assertTrue(await automation_evaluation_due(self.pool))
+        for expected in (1, 2, 3):
+            self.assertEqual(await record_evaluation_failure(self.pool), expected)
+            self.assertFalse(await automation_evaluation_due(self.pool))
+            if expected < 3:
+                await self.admin.execute("""
+                    UPDATE taxonomy_automation_checkpoints
+                    SET evaluation_next_attempt_at=CURRENT_TIMESTAMP - INTERVAL '1 second'
+                    WHERE singleton
+                """)
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT last_failure_code FROM taxonomy_automation_checkpoints WHERE singleton"
+        ), "automation_error")
+        await record_scheduler_heartbeat(self.pool, AutomationPolicy(version="scheduler-errors-v3"))
+        self.assertTrue(await automation_evaluation_due(self.pool))
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT evaluation_failure_attempts FROM taxonomy_automation_checkpoints WHERE singleton"
+        ), 0)
 
     async def test_operations_and_taxonomy_routes_require_the_right_operator_role(self):
         anonymous = httpx.AsyncClient(transport=httpx.ASGITransport(self.app), base_url="http://test")
@@ -765,6 +893,289 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
             (3, "[0,1]", model, representation),
         ])
 
+    async def _publish_automatic_fixture(self, run_id: int, policy: AutomationPolicy):
+        """Supply stage-shaped fixture outputs, then use the real DB gate."""
+        await self.admin.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1", run_id)
+        topic_id = await self.admin.fetchval("INSERT INTO topics DEFAULT VALUES RETURNING id")
+        revision_id = await self.admin.fetchval("""
+            INSERT INTO topic_revisions(taxonomy_run_id,topic_id,cluster_key,name,normalized_name,
+              literal_description,support_count,continuity_decision)
+            VALUES($1,$2,'fixture-cluster','Fixture topic','fixture topic','Fixture topic',3,'new') RETURNING id
+        """, run_id, topic_id)
+        theme_id = await self.admin.fetchval("""
+            INSERT INTO taxonomy_candidate_themes(taxonomy_run_id,name,description,rationale,inference_request,inference_response)
+            VALUES($1,'Fixture theme','Fixture theme','fixture','{}'::jsonb,'{}'::jsonb) RETURNING id
+        """, run_id)
+        await self.admin.execute(
+            "INSERT INTO taxonomy_candidate_theme_topics VALUES($1,$2,$3,TRUE)", run_id, theme_id, revision_id
+        )
+        reconciled = await self.admin.fetchval("""
+            INSERT INTO taxonomy_reconciled_themes(taxonomy_run_id,canonical_candidate_theme_id,normalized_name,topic_set_sha256)
+            VALUES($1,$2,'fixture theme',repeat('a',64)) RETURNING id
+        """, run_id, theme_id)
+        await self.admin.execute(
+            "INSERT INTO taxonomy_reconciled_theme_antecedents VALUES($1,$2,$3,'canonical')",
+            run_id, reconciled, theme_id,
+        )
+        await self.admin.execute("""
+            INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,thresholds,
+              threshold_version,gate_passed,failures,input_sha256)
+            VALUES($1,'{}'::jsonb,'{}'::jsonb,'fixture',TRUE,ARRAY[]::text[],repeat('f',64))
+        """, run_id)
+        await self.admin.execute(
+            "UPDATE taxonomy_runs SET status='ready_for_review',completed_at=CURRENT_TIMESTAMP WHERE id=$1", run_id
+        )
+        await self.admin.execute("""
+            UPDATE taxonomy_run_jobs SET status='completed',completed_at=CURRENT_TIMESTAMP,
+              locked_at=NULL,locked_by=NULL WHERE taxonomy_run_id=$1
+        """, run_id)
+        self.assertEqual(await promote_automatic_candidates(self.pool, policy), 1)
+
+    async def test_automation_accepts_generic_and_mixed_evidence_and_rejects_incompatible_vectors(self):
+        await self.seed_snapshot_embeddings(model="mixed-fixture", representation="answer-only")
+        policy = AutomationPolicy(version="mixed-fixture-v2", embedding_model="mixed-fixture",
+                                  embedding_representation="mixed", embedding_dimension=2, quiet_seconds=0)
+        insufficient = await evaluate_automation(self.pool, AutomationPolicy(
+            version="mixed-minimum-v2", embedding_model="mixed-fixture",
+            embedding_representation="mixed", embedding_dimension=2,
+            minimum_evidence=6, quiet_seconds=0,
+        ))
+        self.assertEqual((insufficient.state, insufficient.reason), ("waiting", "minimum_evidence"))
+        await self.admin.execute("UPDATE input_embeddings SET embedding_representation='question-answer' WHERE original_input_id=2 OR segment_input_id=2")
+        created = await evaluate_automation(self.pool, policy)
+        self.assertEqual(created.state, "created")
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT count(*) FROM taxonomy_run_evidence WHERE taxonomy_run_id=$1", created.run_id
+        ), 5)
+        async with self.pool.acquire() as connection:
+            evidence, config = await load_run_evidence(connection, created.run_id)
+        self.assertEqual((len(evidence), config["min_cluster_size"]), (5, 3))
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT embedding_representation FROM taxonomy_runs WHERE id=$1", created.run_id
+        ), "mixed")
+
+    async def test_automation_reports_model_dimension_and_representation_errors_as_invalid(self):
+        await self.seed_snapshot_embeddings(model="incompatible", representation="answer-only")
+        policy = AutomationPolicy(version="invalid-fixture-v2", embedding_model="expected",
+                                  embedding_representation="mixed", embedding_dimension=2, quiet_seconds=0)
+        for defect, repair in (
+            ("model", "UPDATE input_embeddings SET embedding_model='expected'"),
+            ("dimension", "UPDATE input_embeddings SET embedding='[1,0]'::vector"),
+            ("representation", "UPDATE input_embeddings SET embedding_representation='answer-only'"),
+        ):
+            with self.subTest(defect=defect):
+                result = await evaluate_automation(self.pool, policy)
+                self.assertEqual((result.state, result.reason), ("blocked", "snapshot_invalid"))
+                self.assertEqual(await self.admin.fetchval(
+                    "SELECT last_failure_code FROM taxonomy_automation_checkpoints WHERE singleton"
+                ), "snapshot_invalid")
+                self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM taxonomy_runs"), 1)
+            await self.admin.execute(repair)
+            if defect == "model":
+                await self.admin.execute("UPDATE input_embeddings SET embedding='[1,0,0]'::vector")
+            elif defect == "dimension":
+                await self.admin.execute("UPDATE input_embeddings SET embedding_representation='unsupported'")
+
+    async def test_generic_only_inputs_create_an_automatic_candidate(self):
+        await self.seed_snapshot_embeddings(model="generic-fixture", representation="answer-only")
+        policy = AutomationPolicy(version="generic-fixture-v2", embedding_model="generic-fixture",
+                                  embedding_representation="mixed", embedding_dimension=2, quiet_seconds=0)
+        result = await evaluate_automation(self.pool, policy)
+        self.assertEqual(result.state, "created")
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT snapshot_evidence_count FROM taxonomy_runs WHERE id=$1", result.run_id
+        ), 5)
+
+    async def test_cumulative_successor_includes_late_embedding_and_failed_gate_can_be_superseded(self):
+        await self.seed_snapshot_embeddings(model="replacement-fixture", representation="answer-only")
+        policy = AutomationPolicy(version="replacement-fixture-v2", embedding_model="replacement-fixture",
+                                  embedding_representation="mixed", embedding_dimension=2, quiet_seconds=0)
+        first = await evaluate_automation(self.pool, policy)
+        self.assertEqual(first.state, "created")
+        self.assertEqual(await self.admin.fetchval("SELECT snapshot_evidence_count FROM taxonomy_runs WHERE id=$1", first.run_id), 5)
+        await self._publish_automatic_fixture(first.run_id, policy)
+        self.assertEqual((await evaluate_automation(self.pool, policy)).reason, "unchanged_evidence")
+
+        published_cutoff = await self.admin.fetchval("SELECT source_cutoff FROM taxonomy_runs WHERE id=$1", first.run_id)
+        late_id = await self.admin.fetchval("""
+            INSERT INTO original_inputs(original_text,source,status,created_at)
+            VALUES('Ready late','test','ready_for_analysis',$1::timestamptz - INTERVAL '1 day') RETURNING id
+        """, published_cutoff)
+        self.assertEqual((await evaluate_automation(self.pool, policy)).reason, "preparing_evidence")
+        await self.admin.execute("""
+            INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
+            VALUES($1,'[1,0]'::vector,'replacement-fixture','question-answer')
+        """, late_id)
+        second = await evaluate_automation(self.pool, policy)
+        self.assertEqual(second.state, "created")
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT count(*) FROM taxonomy_run_evidence WHERE taxonomy_run_id=$1", second.run_id
+        ), 6)
+        async with self.pool.acquire() as connection:
+            evidence, _ = await load_run_evidence(connection, second.run_id)
+        self.assertEqual(len(evidence), 6)
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", first.run_id), "published")
+        await self.admin.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1", second.run_id)
+        await self.admin.execute("""
+            INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,thresholds,
+              threshold_version,gate_passed,failures,input_sha256)
+            VALUES($1,'{}'::jsonb,'{}'::jsonb,'fixture',FALSE,ARRAY['fixture_failure'],repeat('e',64))
+        """, second.run_id)
+        await self.admin.execute("UPDATE taxonomy_runs SET status='ready_for_review',completed_at=CURRENT_TIMESTAMP WHERE id=$1", second.run_id)
+        await self.admin.execute("""
+            UPDATE taxonomy_run_jobs SET status='completed',completed_at=CURRENT_TIMESTAMP,
+              locked_at=NULL,locked_by=NULL WHERE taxonomy_run_id=$1
+        """, second.run_id)
+        blocked = await evaluate_automation(self.pool, policy)
+        self.assertEqual((blocked.state, blocked.reason), ("blocked", "quality_gate_failed"))
+        self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM taxonomy_runs"), 3)
+        new_id = await self.admin.fetchval("""
+            INSERT INTO original_inputs(original_text,source,status)
+            VALUES('Changed evidence','test','ready_for_analysis') RETURNING id
+        """)
+        await self.admin.execute("""
+            INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
+            VALUES($1,'[0,1]'::vector,'replacement-fixture','answer-only')
+        """, new_id)
+        successor = await evaluate_automation(self.pool, policy)
+        self.assertEqual(successor.state, "created")
+        self.assertEqual(await self.admin.fetchval("SELECT snapshot_evidence_count FROM taxonomy_runs WHERE id=$1", successor.run_id), 7)
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", first.run_id), "published")
+
+    async def test_unexpected_snapshot_failure_has_bounded_durable_retry_and_terminal_state(self):
+        policy = AutomationPolicy(version="retry-fixture-v2", embedding_model="fixture",
+                                  embedding_representation="fixture", embedding_dimension=2, quiet_seconds=0)
+        with patch("triage_processor.taxonomy_automation.create_taxonomy_snapshot",
+                   new=AsyncMock(side_effect=RuntimeError("private model output"))):
+            first = await evaluate_automation(self.pool, policy)
+            self.assertEqual((first.state, first.reason), ("waiting", "snapshot_retrying"))
+            decision = await self.admin.fetchrow("""
+                SELECT id,status,failure_attempts,next_attempt_at,failure_code
+                FROM taxonomy_automation_decisions WHERE policy_version=$1
+            """, policy.version)
+            self.assertEqual((decision["status"], decision["failure_attempts"], decision["failure_code"]),
+                             ("reserved", 1, "snapshot_retrying"))
+            self.assertIsNotNone(decision["next_attempt_at"])
+            self.assertEqual((await evaluate_automation(self.pool, policy)).reason, "snapshot_retrying")
+            self.assertEqual(await self.admin.fetchval(
+                "SELECT failure_attempts FROM taxonomy_automation_decisions WHERE id=$1", decision["id"]
+            ), 1)
+            for expected_attempt in (2, 3):
+                await self.admin.execute(
+                    "UPDATE taxonomy_automation_decisions SET next_attempt_at=CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id=$1",
+                    decision["id"],
+                )
+                result = await evaluate_automation(self.pool, policy)
+                self.assertEqual(result.reason, "snapshot_error" if expected_attempt == 3 else "snapshot_retrying")
+        row = await self.admin.fetchrow("""
+            SELECT status,failure_attempts,failure_code,next_attempt_at
+            FROM taxonomy_automation_decisions WHERE id=$1
+        """, decision["id"])
+        self.assertEqual(tuple(row), ("failed", 3, "snapshot_error", None))
+        self.assertEqual((await evaluate_automation(self.pool, policy)).reason, "snapshot_error")
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT count(*) FROM taxonomy_automation_decisions WHERE policy_version=$1", policy.version
+        ), 1)
+        self.assertNotIn("private model output", str(row))
+
+    async def test_legacy_reserved_decision_replays_its_original_post_cutoff_membership(self):
+        published_cutoff = await self.admin.fetchval(
+            "SELECT source_cutoff FROM taxonomy_runs WHERE status='published'"
+        )
+        await self.admin.execute("""
+            INSERT INTO original_inputs(original_text,source,status,created_at)
+            VALUES('Legacy A','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds'),
+                  ('Legacy B','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds'),
+                  ('Legacy C','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds')
+        """, published_cutoff)
+        await self.admin.executemany("""
+            INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
+            VALUES($1,'[1,0]'::vector,'fixture','fixture')
+        """, [(5,), (6,), (7,)])
+        policy = AutomationPolicy(version="legacy-replay-v1", embedding_model="fixture",
+                                  embedding_representation="fixture", embedding_dimension=2, quiet_seconds=0)
+        await self.admin.execute("""
+            INSERT INTO taxonomy_automation_decisions(
+              idempotency_key,policy_version,evidence_cutoff,predecessor_cutoff,status)
+            VALUES('automatic:legacy-replay-v1:reserved',$1,CURRENT_TIMESTAMP,$2,'reserved')
+        """, policy.version, published_cutoff)
+        result = await evaluate_automation(self.pool, policy)
+        self.assertEqual(result.state, "created")
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT snapshot_evidence_count FROM taxonomy_runs WHERE id=$1", result.run_id
+        ), 3)
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT membership_mode FROM taxonomy_automation_decisions WHERE taxonomy_run_id=$1", result.run_id
+        ), "post_cutoff")
+
+    async def test_cumulative_reserved_decision_replays_committed_snapshot_after_crash(self):
+        policy = AutomationPolicy(version="cumulative-replay-v2", embedding_model="fixture",
+                                  embedding_representation="fixture", embedding_dimension=2, quiet_seconds=0)
+        published_cutoff = await self.admin.fetchval(
+            "SELECT source_cutoff FROM taxonomy_runs WHERE status='published'"
+        )
+        new_id = await self.admin.fetchval("""
+            INSERT INTO original_inputs(original_text,source,status,created_at)
+            VALUES('New','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds') RETURNING id
+        """, published_cutoff)
+        await self.admin.execute("""
+            INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
+            VALUES($1,'[1,0]'::vector,'fixture','fixture')
+        """, new_id)
+        key = "automatic:cumulative-replay-v2:reserved"
+        await self.admin.execute("""
+            INSERT INTO taxonomy_automation_decisions(
+              idempotency_key,policy_version,evidence_cutoff,predecessor_cutoff,membership_mode,status)
+            VALUES($1,$2,CURRENT_TIMESTAMP,$3,'cumulative','reserved')
+        """, key, policy.version, published_cutoff)
+        frozen = await create_taxonomy_snapshot(
+            self.pool, policy.snapshot_request(idempotency_key=key, after_cutoff=None)
+        )
+        self.assertEqual(frozen.evidence_count, 6)
+        replay = await evaluate_automation(self.pool, policy)
+        self.assertEqual((replay.state, replay.run_id), ("recovered", frozen.id))
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT count(*) FROM taxonomy_automation_decisions WHERE taxonomy_run_id=$1", frozen.id
+        ), 1)
+
+    async def test_admission_cutoff_freezes_membership_when_evidence_arrives_before_snapshot_write(self):
+        policy = AutomationPolicy(version="cutoff-fixture-v2", embedding_model="fixture",
+                                  embedding_representation="fixture", embedding_dimension=2, quiet_seconds=0)
+        original_create = create_taxonomy_snapshot
+        async def create_after_late_input(pool, request):
+            late_id = await self.admin.fetchval("""
+                INSERT INTO original_inputs(original_text,source,status)
+                VALUES('Arrived after reservation','test','ready_for_analysis') RETURNING id
+            """)
+            await self.admin.execute("""
+                INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
+                VALUES($1,'[1,0]'::vector,'fixture','fixture')
+            """, late_id)
+            return await original_create(pool, request)
+        with patch("triage_processor.taxonomy_automation.create_taxonomy_snapshot",
+                   new=create_after_late_input):
+            first = await evaluate_automation(self.pool, policy)
+        self.assertEqual(first.state, "created")
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT snapshot_evidence_count FROM taxonomy_runs WHERE id=$1", first.run_id
+        ), 5)
+        self.assertEqual(await self.admin.fetchval("""
+            SELECT decision.snapshot_cutoff=run.source_cutoff
+            FROM taxonomy_automation_decisions decision JOIN taxonomy_runs run ON run.id=decision.taxonomy_run_id
+            WHERE run.id=$1
+        """, first.run_id), True)
+        await self.admin.execute(
+            "UPDATE taxonomy_runs SET status='failed',error_summary='fixture' WHERE id=$1", first.run_id
+        )
+        await self.admin.execute(
+            "UPDATE taxonomy_run_jobs SET status='failed',last_error='fixture' WHERE taxonomy_run_id=$1", first.run_id
+        )
+        successor = await evaluate_automation(self.pool, policy)
+        self.assertEqual(successor.state, "created")
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT snapshot_evidence_count FROM taxonomy_runs WHERE id=$1", successor.run_id
+        ), 6)
+
     async def test_snapshot_api_freezes_canonical_evidence_and_is_idempotent(self):
         await self.seed_snapshot_embeddings()
         payload = self.snapshot_payload()
@@ -826,23 +1237,27 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(changed.status_code, 409, changed.text)
         self.assertEqual(changed.json()["detail"]["code"], "taxonomy_idempotency_conflict")
 
-    async def test_automatic_snapshot_is_singleton_replayable_and_excludes_published_evidence(self):
+    async def test_automatic_snapshot_is_singleton_replayable_and_includes_published_evidence(self):
         published_cutoff = await self.admin.fetchval(
             "SELECT source_cutoff FROM taxonomy_runs WHERE status='published'"
         )
         await self.admin.execute("""
             INSERT INTO original_inputs(original_text,source,status,created_at)
-            VALUES('Automatic evidence','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds');
+            VALUES('Automatic evidence A','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds'),
+                  ('Automatic evidence B','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds'),
+                  ('Automatic evidence C','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds');
         """, published_cutoff)
         await asyncio.sleep(1.05)
         await self.admin.execute("""
             INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
-            VALUES(5,'[1,0]'::vector,'automatic-fixture','question-answer')
+            VALUES(5,'[1,0]'::vector,'fixture','fixture'),
+                  (6,'[0,1]'::vector,'fixture','fixture'),
+                  (7,'[1,1]'::vector,'fixture','fixture')
         """)
         policy = AutomationPolicy(
-            quiet_seconds=0, embedding_model="automatic-fixture",
-            embedding_representation="question-answer", embedding_dimension=2,
-            version="automatic-fixture-v1",
+            quiet_seconds=0, embedding_model="fixture",
+            embedding_representation="fixture", embedding_dimension=2,
+            version="automatic-fixture-v2",
         )
         first, second = await asyncio.gather(
             evaluate_automation(self.pool, policy), evaluate_automation(self.pool, policy),
@@ -856,7 +1271,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         run_id = runs[0]["id"]
         self.assertEqual(await self.admin.fetchval(
             "SELECT count(*) FROM taxonomy_run_evidence WHERE taxonomy_run_id=$1", run_id
-        ), 1)
+        ), 8)
         self.assertEqual(await self.admin.fetchval(
             "SELECT count(*) FROM taxonomy_run_jobs WHERE taxonomy_run_id=$1", run_id
         ), 1)
@@ -926,6 +1341,52 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await complete_stage(self.pool, retry, output_material="cancelled"))
         response = await self.client.post(f"/taxonomy-runs/{run_id}/schedule")
         self.assertEqual(response.status_code, 409)
+
+    async def test_terminal_stage_failure_rolls_back_if_queue_transition_fails(self):
+        run_id = await self._recovery_candidate("rollback-stage")
+        stage = await claim_next_stage(self.pool, lease_owner="rollback", lease_seconds=60)
+        before = await self.admin.fetchrow("""
+            SELECT stage.status AS stage_status, run.status AS run_status, job.status AS job_status
+            FROM taxonomy_run_stages stage JOIN taxonomy_runs run ON run.id=stage.taxonomy_run_id
+            JOIN taxonomy_run_jobs job ON job.taxonomy_run_id=run.id WHERE stage.id=$1
+        """, stage.id)
+        await self.admin.execute("""
+            CREATE FUNCTION reject_queue_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN IF NEW.status='failed' THEN RAISE EXCEPTION 'test queue transition failure'; END IF;
+                  RETURN NEW; END; $$;
+            CREATE TRIGGER reject_queue_failure BEFORE UPDATE ON taxonomy_run_jobs
+            FOR EACH ROW EXECUTE FUNCTION reject_queue_failure();
+        """)
+        with self.assertRaisesRegex(asyncpg.RaiseError, "test queue transition failure"):
+            await fail_stage(self.pool, stage, ValueError("private"), max_attempts=1,
+                             retry_base_seconds=1, retry_max_seconds=1)
+        after = await self.admin.fetchrow("""
+            SELECT stage.status AS stage_status, run.status AS run_status, job.status AS job_status
+            FROM taxonomy_run_stages stage JOIN taxonomy_runs run ON run.id=stage.taxonomy_run_id
+            JOIN taxonomy_run_jobs job ON job.taxonomy_run_id=run.id WHERE stage.id=$1
+        """, stage.id)
+        self.assertEqual(tuple(after), tuple(before))
+        await self.admin.execute("DROP TRIGGER reject_queue_failure ON taxonomy_run_jobs")
+        self.assertEqual(await fail_stage(self.pool, stage, ValueError("private"), max_attempts=1,
+                                          retry_base_seconds=1, retry_max_seconds=1), "failed")
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", run_id), "failed")
+
+    async def test_reclaimed_stage_rejects_stale_attempt_with_reused_owner(self):
+        run_id = await self._recovery_candidate("same-owner-reclaim")
+        first = await claim_next_stage(self.pool, lease_owner="same-owner", lease_seconds=60)
+        await self.admin.execute(
+            "UPDATE taxonomy_run_stages SET lease_expires_at=CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE id=$1",
+            first.id,
+        )
+        second = await claim_next_stage(self.pool, lease_owner="same-owner", lease_seconds=60)
+        self.assertEqual((second.id, second.attempt), (first.id, first.attempt + 1))
+        run_status = await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", run_id)
+        self.assertFalse(await complete_stage(self.pool, first, output_material="stale"))
+        self.assertIsNone(await fail_stage(self.pool, first, ValueError("stale"), max_attempts=1,
+                                           retry_base_seconds=1, retry_max_seconds=1))
+        self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", run_id), run_status)
+        self.assertEqual(await fail_stage(self.pool, second, ValueError("current"), max_attempts=2,
+                                          retry_base_seconds=1, retry_max_seconds=1), "failed")
 
     async def test_automation_recovers_snapshot_committed_before_decision_link(self):
         await self.seed_snapshot_embeddings()

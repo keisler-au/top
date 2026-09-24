@@ -41,6 +41,15 @@ uncommitted changes; HEAD alone does not describe a dirty working tree.
   documentation is current, and the next package's assumptions still hold.
   Record a durable handoff in the plan before ending the session.
 
+## Docker Compose command authorization
+
+Within otherwise authorized repository work, every command whose command line
+starts with `docker compose` has standing user authorization and does not need
+separate confirmation. Do not pause merely to ask permission before running
+such a command. This standing authorization does not expand the requested
+product scope or independently authorize deletion of persistent data. Any
+approval that the execution environment itself requires still applies.
+
 These rules govern repository work; they do not authorize deployment, data
 deletion, or additional product scope. Documentation-only work requires link
 and consistency checks, not a gratuitous full application test run.

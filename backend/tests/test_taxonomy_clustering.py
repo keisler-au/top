@@ -24,6 +24,18 @@ from triage_processor.taxonomy_experiment import ClusterResult
 
 
 class TaxonomyClusteringTests(unittest.TestCase):
+    def test_automatic_minimum_three_rows_can_reach_real_clusterer(self):
+        evidence = [
+            ClusterEvidence(1, 1, (1.0, 0.0)),
+            ClusterEvidence(2, 2, (0.95, 0.05)),
+            ClusterEvidence(3, 3, (0.9, 0.1)),
+        ]
+        plan = make_cluster_plan(evidence, min_cluster_size=3, min_samples=2)
+        self.assertEqual(
+            sum(len(cluster.member_indexes) for cluster in plan.clusters) + len(plan.noise_indexes),
+            3,
+        )
+
     def test_persisted_plan_is_a_noop_when_a_stage_is_reclaimed(self):
         connection = ExistingPlanConnection()
         asyncio.run(persist_cluster_plan(connection, 9, [], ClusterPlan((), (), ())))

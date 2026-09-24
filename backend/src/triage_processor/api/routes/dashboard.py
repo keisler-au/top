@@ -23,6 +23,7 @@ from triage_processor.api.dashboard_schemas import (
     TaxonomyPageResponse,
     TaxonomyType,
 )
+from triage_processor.taxonomy_status import current_candidate_status
 
 router = APIRouter(tags=["dashboard"])
 MAX_PAGE_OFFSET = 100_000
@@ -79,26 +80,43 @@ async def _require_published_taxonomy(connection: Any) -> None:
         "SELECT EXISTS (SELECT 1 FROM taxonomy_runs WHERE status = 'published')"
     )
     if not available:
-        blocked = await connection.fetchval(
-            """SELECT EXISTS (
-                SELECT 1 FROM taxonomy_release_attestations gate
-                JOIN taxonomy_runs run ON run.id=gate.taxonomy_run_id
-                WHERE run.status IN ('running','failed','ready_for_review') AND NOT gate.gate_passed
-            )"""
-        )
-        failed = await connection.fetchval(
-            """SELECT EXISTS (
-                SELECT 1 FROM taxonomy_runs run
-                WHERE run.status='failed' OR (run.status IN ('pending','running') AND EXISTS (
-                    SELECT 1 FROM taxonomy_run_stages stage
-                    WHERE stage.taxonomy_run_id=run.id AND stage.status IN ('failed','cancelled')
-                ))
-            )"""
-        )
+        candidate = await current_candidate_status(connection)
+        code = {
+            "quality_blocked": "taxonomy_quality_blocked",
+            "candidate_failed": "taxonomy_candidate_failed",
+            "running_candidate": "taxonomy_candidate_processing",
+        }.get(candidate)
+        if code is None:
+            checkpoint = await connection.fetchrow(
+                """SELECT last_failure_code,
+                          scheduler_heartbeat_expires_at < CURRENT_TIMESTAMP AS scheduler_expired,
+                          scheduler_heartbeat_expires_at IS NULL AS scheduler_never_started
+                   FROM taxonomy_automation_checkpoints WHERE singleton"""
+            )
+            if checkpoint is not None and checkpoint["last_failure_code"] in {
+                "policy_disabled", "snapshot_invalid", "snapshot_error",
+                "snapshot_retrying", "evidence_failed", "automation_error",
+            }:
+                code = "taxonomy_automation_blocked"
+            elif checkpoint is not None and (
+                checkpoint["scheduler_expired"] or checkpoint["scheduler_never_started"]
+            ):
+                code = "taxonomy_scheduler_unavailable"
+            else:
+                failed_preparation = await connection.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM worker_jobs WHERE status='failed')"
+                )
+                if failed_preparation:
+                    code = "taxonomy_automation_blocked"
+                elif checkpoint is None and await connection.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM original_inputs)"
+                ):
+                    code = "taxonomy_scheduler_unavailable"
+                else:
+                    code = "taxonomy_first_run"
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"code": "taxonomy_quality_blocked" if blocked else
-                    "taxonomy_candidate_failed" if failed else "taxonomy_first_run"},
+            detail={"code": code},
         )
 
 

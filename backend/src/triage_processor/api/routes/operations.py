@@ -7,6 +7,7 @@ from triage_processor.api.operations_schemas import (
     TaxonomyRunMetrics,
 )
 from triage_processor.api.security import require_operator
+from triage_processor.taxonomy_status import current_candidate_status
 
 router = APIRouter(prefix="/operations", tags=["operations"])
 
@@ -88,31 +89,42 @@ async def operations_summary(request: Request) -> OperationsSummaryResponse:
         )
         automation = await connection.fetchrow("""
             SELECT checkpoint.policy_version, checkpoint.last_failure_code,
+                   checkpoint.scheduler_heartbeat_expires_at < CURRENT_TIMESTAMP AS scheduler_expired,
+                   checkpoint.scheduler_heartbeat_expires_at IS NULL AS scheduler_never_started,
                    count(inputs.id) FILTER (WHERE inputs.status IN ('new','ready_for_embedding'))::bigint AS preparing_evidence,
-                   EXISTS (SELECT 1 FROM taxonomy_runs WHERE status IN ('pending','running','ready_for_review')) AS candidate_active,
-                   EXISTS (SELECT 1 FROM taxonomy_release_attestations gate
-                           JOIN taxonomy_runs run ON run.id=gate.taxonomy_run_id
-                           WHERE run.status IN ('running','failed','ready_for_review') AND NOT gate.gate_passed) AS quality_blocked,
-                   COALESCE((SELECT status='failed' FROM taxonomy_runs ORDER BY id DESC LIMIT 1), FALSE) AS candidate_failed,
+                   EXISTS (SELECT 1 FROM worker_jobs WHERE status='failed') AS evidence_failed,
                    EXISTS (SELECT 1 FROM taxonomy_runs WHERE status='published') AS has_published
             FROM taxonomy_automation_checkpoints checkpoint
             FULL JOIN original_inputs inputs ON TRUE
-            GROUP BY checkpoint.policy_version, checkpoint.last_failure_code
+            GROUP BY checkpoint.policy_version, checkpoint.last_failure_code,
+                     checkpoint.scheduler_heartbeat_expires_at
             ORDER BY checkpoint.policy_version NULLS LAST
             LIMIT 1
         """)
         if automation is None:
             automation = {"policy_version": None, "last_failure_code": None,
-                          "preparing_evidence": 0, "candidate_active": False,
-                          "quality_blocked": False, "has_published": False, "candidate_failed": False}
-        if automation["quality_blocked"]:
+                          "preparing_evidence": 0, "has_published": False,
+                          "evidence_failed": False, "scheduler_expired": False,
+                          "scheduler_never_started": True}
+        candidate = await current_candidate_status(
+            connection, automatic_policy_version=automation["policy_version"]
+        )
+        if candidate == "quality_blocked":
             automation_state = "blocked_by_quality"
-        elif automation["candidate_active"]:
+        elif candidate == "candidate_failed":
+            automation_state = "blocked_by_failure"
+        elif candidate == "running_candidate":
             automation_state = "running_candidate"
-        elif automation["candidate_failed"]:
+        elif automation["last_failure_code"] == "policy_disabled":
+            automation_state = "blocked_by_policy"
+        elif automation["last_failure_code"]:
             automation_state = "blocked_by_failure"
         elif automation["has_published"]:
             automation_state = "automatically_published"
+        elif automation["evidence_failed"]:
+            automation_state = "blocked_by_failure"
+        elif automation["scheduler_expired"] or automation["scheduler_never_started"]:
+            automation_state = "scheduler_unavailable"
         elif automation["preparing_evidence"]:
             automation_state = "preparing_evidence"
         else:

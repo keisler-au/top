@@ -3,8 +3,8 @@
 **Status: archived — complete.** Every BT and PW package in this delivery plan
 has completion evidence recorded below. It is retained as the historical
 delivery record for the run-scoped batch taxonomy and public website; it is not
-an implementation plan. The active automation programme is in the
-[current work packages](../work-packages.md).
+an implementation plan. Its automation successor and recovery evidence are in
+the [completed taxonomy recovery plan](taxonomy-recovery-and-lifecycle-repair-work-packages.md).
 
 This historical plan first made the run-scoped batch
 taxonomy the sole production taxonomy and retires the incremental topic/theme
