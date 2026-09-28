@@ -1,132 +1,189 @@
 # Architecture
 
-For normative implementation rules and ownership, see the
-[architecture contracts](architecture-contracts.md). The
-[baseline review](reviews/architecture-baseline.md) records known discrepancies
-between this reference, current code and historical plans.
+This document shows how submitted answers become taxonomy and public content.
+It describes the desired system as one input journey. Delivery status belongs
+in [the work packages](work-packages.md); deployed differences belong in
+[current state](current-state.md); implementation rules belong in the
+[architecture contracts](architecture-contracts.md).
 
-## Components
-
-```text
-public-web (allowlisted public HTML, discovery documents, and self-hosted assets)
-admin-web (framework-free Web Components, explicit admin profile)
-    -> /api proxy -> FastAPI routes
-        -> PostgreSQL + pgvector
-        -> Ollama chat and embedding APIs
-        -> evidence-preparation workers and batch taxonomy scheduler
-        -> article-generation worker
-```
-
-`backend/` is a Python `src` project. `frontend/admin/` is a framework-free
-TypeScript/Web Components administrative application; `frontend/public/` is a
-dependency-free static public edge. `infrastructure/postgres/` contains the
-fresh-install schema and ordered migrations; `compose.yaml` connects runtime
-services. The API owns HTTP validation, `clients/` owns model communication,
-and workers own background processing.
-
-`article_publications` is the minimal public-projection boundary. It records an
-article's approved immutable revision, permanent slug, and publication times;
-`article_publication_themes` preserves the stable batch-theme display snapshot
-for that revision. Neither relation contains evidence, source inputs,
-generation metadata, editorial audit data, prompts, or taxonomy descriptions.
-The projection is populated by its transactional migration backfill and by the
-same transaction that approves an article. Reapproval advances the projection
-to the new immutable revision while preserving the original slug and
-first-publication time; prior revision-scoped theme snapshots remain immutable.
-Public read routes are served by this projection-only renderer and public edge.
-Taxonomy lineage can change as runs are published or rolled back, but it never
-mutates an approved article's revision-scoped public theme display snapshot.
-
-The internal `/_site` renderer is server-rendered HTML only. It queries only
-the active approved projection and its revision-scoped batch-theme snapshots;
-it neither invokes nor mirrors administrative JSON APIs. The public nginx edge
-does not route to it until the separately verified rewrite package.
-
-`public-web` rewrites only `/`, `/insights`, `/insights/{slug}`, `/themes`,
-`/themes/{id}-{slug}`, `/about`, `robots.txt`, and `sitemap.xml` to that
-internal renderer. Its named internal 404 handler returns the renderer's
-generic public 404 for all other paths; direct `/_site`, API, and dashboard
-paths remain unavailable at the edge.
-
-`PUBLIC_SITE_ORIGIN` is a validated absolute HTTP(S) origin with no path,
-query, fragment, or credentials. Along with `PUBLIC_SITE_NAME` and optional
-`PUBLIC_SITE_DESCRIPTION`, it is the sole source for canonical, Open Graph,
-JSON-LD, and sitemap URLs; request Host is never consulted. Public discovery
-includes only allowlisted pages, active projection articles, and active public
-themes. The nginx edge applies a scriptless, self-host-only CSP, denies frames
-and browser capabilities, uses short shared caching for HTML/discovery and
-unhashed assets, and reserves immutable caching for content-hashed assets.
-
-## Backend responsibilities
-
-- `api` owns FastAPI application startup, HTTP schemas, and routes.
-- `clients` owns communication with Ollama's chat and embedding APIs.
-- `workers` owns eligibility/segmentation, embeddings, and article generation.
-- `job_queue.py` owns durable job claiming, leases, retries, and completion.
-- `config.py` owns shared environment-derived configuration.
-
-## Evidence preparation and batch taxonomy
+## Input journey
 
 ```text
-HTTP input
-→ eligibility and segmentation
-→ embeddings
-→ immutable batch snapshot
-→ leased clustering, topic naming, theme inference, reconciliation, and quality
-→ quality-gated automatic publication of one taxonomy run
+Google Forms → response sheets → poll unread rows ┐
+                                                  ├→ store each answer
+Direct API input ─────────────────────────────────┘
+    → check eligibility
+    → split answers that contain multiple ideas
+    → turn each evidence item into a semantic vector
+    → freeze the available evidence into a taxonomy snapshot
+    → cluster similar evidence within each question
+    → name each coherent cluster as a provisional topic
+    → merge equivalent topics found across different questions
+    → group related topics into optional themes
+    → record classified and unclassified coverage
+    → publish one consistent taxonomy
+    → use its evidence to generate draft articles
+    → human review and approval
+    → public pages
 ```
 
-The original input remains the source of truth. PostgreSQL stores pipeline
-state and generated classifications. Ollama has no direct database access.
-The evidence queue has exactly two executable types: `eligibility_segmentation`
-and `embeddings`. The batch scheduler owns all taxonomy stages in its separate
-run-stage lease model.
+## 1. Capture inputs
 
-Automatic admission and snapshot creation use the same canonical selector.
-Replacement candidates freeze cumulative eligible evidence and recluster the
-complete set; the previous publication cutoff is audit and change-detection
-metadata, never a replacement-membership filter. Automatic `mixed`
-representation permits answer-only and question-answer vectors from one model
-and dimension. Decisions record historical post-cutoff or new cumulative
-membership so a crash replay preserves the frozen selection rule.
+- Google Forms → response sheets → poll only unread rows — avoids importing the
+  same response twice.
+- One non-empty answer cell → one stored input — keeps each question and answer
+  independently analysable.
+- Sheet heading → question context — gives meaning to short answers such as
+  “No” or “Price”.
+- Sheet row → submission identity — keeps answers from one respondent grouped.
+- Sheet row + column → stable source identity — makes repeated polling safe.
+- Direct API input → the same stored-input path — keeps one processing pipeline.
+- Stored input → unchanged original answer — preserves the source evidence.
 
-## Question context
+## 2. Prepare evidence
 
-Question identity is normalized in `questions` as:
+- Answer + question context → eligibility check — removes spam, gibberish,
+  unrelated text, and administrative content from analysis.
+- Responsive answer, even when short → eligible evidence — useful input does
+  not need to be a complete sentence.
+- One idea → keep the whole answer as one evidence item — retains context.
+- Multiple independent ideas → split into separate evidence segments — lets
+  each idea belong to a different topic.
+
+Segments follow four rules:
+
+- Each segment must make sense as an answer on its own.
+- Qualifiers, examples, conditions, locations, and negation stay with the idea
+  they modify.
+- Wording is copied from the answer; question wording is never added.
+- Segments stay in source order, do not overlap, and together retain the whole
+  substantive answer.
+
+If an answer is split, its segments become the evidence used by the taxonomy.
+Otherwise, the full answer is used. The parent answer and its segments are
+never counted together.
+
+## 3. Represent meaning
+
+- Evidence item → semantic vector — allows meaning-based comparison rather than
+  exact-word matching.
+- Answer-focused vector + retained question context — prevents repeated question
+  wording from dominating clusters while keeping terse answers understandable.
+- One taxonomy run → one compatible vector model and representation — prevents
+  unlike vectors from being mixed.
+
+## 4. Build a taxonomy candidate
+
+- Prepared evidence → wait for a minimum amount and a quiet period — avoids
+  starting while inputs are still arriving or being prepared.
+- All eligible evidence at one cutoff → immutable cumulative snapshot — makes
+  the candidate reproducible and ensures replacements use the complete dataset.
+- Snapshot → group evidence by question — prevents unrelated questions from
+  producing shared clusters.
+- Each question group → semantic clusters — collects answers expressing the
+  same specific concept.
+- Cluster quality checks → coherent clusters or unresolved evidence — prevents
+  weak, mixed, or unstable groups from becoming topics.
+- Evidence outside a usable cluster → noise — avoids forcing every answer into
+  a topic.
+
+## 5. Create topics
+
+- Coherent cluster → bounded evidence packet — gives the model enough central
+  and varied examples without an unbounded prompt.
+- Evidence packet + question context → LLM topic name and description — lets
+  semantic interpretation handle synonyms and varied wording.
+- Model response → structural and provenance checks — verifies valid output and
+  membership without pretending word overlap proves meaning.
+- Accepted response → provisional topic — preserves the question-level result
+  before cross-question reconciliation.
+- Rejected response → unclassified evidence with a review record — keeps useful
+  results publishable without hiding uncertainty.
+
+## 6. Reconcile topics and themes
+
+- Provisional topics across questions → compare plausible equivalents — finds
+  the same concept expressed through different questions.
+- Equivalent topics → one canonical topic with their combined evidence — avoids
+  duplicate topics without losing support or provenance.
+- Related but meaningfully different topics → remain separate — preserves
+  distinctions that matter.
+- Related canonical topics → optional theme — provides broader navigation
+  without forcing every topic into a theme.
+
+## 7. Publish the taxonomy
+
+- Candidate → coverage summary — records total, classified, unclassified, and
+  noise evidence, plus question and submission counts.
+- Topics + coverage + provenance → immutable quality attestation — makes the
+  publication decision auditable.
+- At least one valid canonical topic + passing attestation → publishable run —
+  allows useful partial results without presenting them as complete.
+- Passing run → atomically replace the previous published run — gives every
+  reader one consistent taxonomy.
+- Failed run → keep the previous publication — prevents a failed replacement
+  from interrupting readers.
+
+Inputs have three states relative to the published taxonomy:
+
+- Classified → included in the snapshot and attached to a canonical topic.
+- Unclassified → included in the snapshot but not attached to a canonical topic.
+- Pending → arrived after the published snapshot.
+
+## 8. Turn taxonomy into outputs
+
+The published taxonomy produces two outputs.
+
+### Administrative output
+
+- Published run → topics, themes, evidence, coverage, and recommendations —
+  gives editors one consistent view of the available insight.
+- Candidate details → protected review view — exposes failures and provenance
+  without making source evidence public.
+
+### Public content output
+
+- Published topic or theme → freeze its evidence and article template — keeps a
+  generation job stable even when the taxonomy later changes.
+- Frozen evidence → LLM article draft — grounds the draft in known evidence.
+- Draft → validate citations and taxonomy references → render safe HTML — keeps
+  generated claims and markup inside the approved boundaries.
+- Generated article → editorial review — keeps publication a human decision.
+- Human approval → immutable public article snapshot — prevents later taxonomy
+  or article edits from silently changing published content.
+- Approved snapshot → allowlisted public pages — exposes articles without
+  exposing evidence, prompts, administration, or operational APIs.
+
+## Architectural guardrails
+
+- Original answers, taxonomy snapshots, model provenance, and approved article
+  revisions remain traceable and immutable.
+- PostgreSQL owns lifecycle and publication decisions; models can propose
+  content but cannot publish it.
+- Evidence work, taxonomy stages, and article generation use durable leases and
+  retries so crashes do not duplicate committed results.
+- A replacement taxonomy is built separately; the existing publication remains
+  live until the replacement passes and swaps atomically.
+- Admin, API, database, model, and review surfaces remain private. Only the
+  allowlisted public article projection reaches the public edge.
+- Retired incremental taxonomy data remains in a protected audit archive and is
+  never used as a live reader fallback.
+
+## System boundaries
 
 ```text
-(source, form_key, question_key, question_version)
+google-sheets poller → FastAPI input endpoint
+
+admin-web → FastAPI → PostgreSQL + pgvector
+                    → Ollama chat and embeddings
+                    → evidence workers
+                    → taxonomy scheduler
+                    → article-generation worker
+
+public-web → allowlisted server-rendered pages only
 ```
 
-Each row stores an immutable `question_text` snapshot. A new wording requires a
-new positive `question_version`; neither an existing question nor an answer's
-`question_id` can be mutated. `original_inputs.submission_key` groups the
-answers from one submission, but is only meaningful together with the
-question's source and form. Inputs without question context remain valid,
-fully generic inputs.
-
-Eligibility and topic assignment can use question text to interpret terse
-answers such as “Price” or “No”. Segments still contain answer content only.
-Embeddings contain `Question: …` and `Answer: …` for contextual inputs, while
-generic inputs retain answer-only embeddings.
-
-## Published taxonomy and legacy archive
-
-```text
-frozen canonical evidence -> embeddings -> clustering -> literal topics
-    -> reconciled themes -> reviewed candidate run -> one published run
-```
-
-Every production reader resolves the one published run; article associations
-retain stable taxonomy snapshots. The retired incremental topic/theme workers,
-queue types, and reader fallbacks have no runtime path. Its historical
-classifications, themes, suggestions, and assignment metadata are retained
-only in the immutable `taxonomy_legacy_archive` audit schema. The mutable
-legacy source tables and topic columns were destructively removed by migration
-`037_drop_legacy_taxonomy_schema.sql`; the archive is their only retained
-taxonomy history. See the [work-package archive](archive/work-packages.md).
-
-The dashboard and protected operations API share the current candidate-status
-rule. It reports a failed release attestation or terminal stage/run failure for
-the newest candidate and does not let an older failure mask newer processing.
-Publication still depends on the database-gated passing attestation.
+Ownership follows these boundaries: FastAPI owns HTTP validation, workers own
+background processing, taxonomy modules own taxonomy construction, model
+clients own Ollama communication, PostgreSQL migrations own durable invariants,
+and the public projection owns public visibility.

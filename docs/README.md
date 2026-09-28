@@ -1,9 +1,10 @@
 # Documentation guide
 
-Reference documents describe implemented behaviour. The architecture and
-delivery contracts govern new work; when a delivery plan is active,
-`docs/work-packages.md` records its approved scope and sequence. Historical plans
-are retained in the archive and are never instructions for new work.
+Current state, API, operations, and surface-specific references describe
+implemented behaviour. The architecture is the canonical plain-language map
+of the desired system; work packages map delivery to that design. Architecture
+and delivery contracts govern new work. Historical plans are retained in the
+archive and are never instructions for new work.
 
 Agents start with [AGENTS.md](../AGENTS.md). For a new feature, read the
 [architecture contracts](architecture-contracts.md) and
@@ -18,9 +19,10 @@ short contract in the delivery guide. Boundary changes use the
 | --- | --- | --- |
 | [Root README](../README.md) | Project purpose, local development, service startup, and the concise operator entry point. | The supported developer workflow, service topology, or primary documentation entry point changes. |
 | [Current state](current-state.md) | Concise deployed batch-taxonomy boundary and remaining programme. | The production taxonomy, publication, archive, or delivery boundary changes. |
-| [Architecture](architecture.md) | Components, ownership, persistence boundaries, and processing flows. | A component, data owner, runtime flow, or system boundary changes. |
+| [Architecture](architecture.md) | Canonical plain-language pipeline, design rationale, components, ownership, persistence boundaries, and processing flows. | A component, data owner, runtime flow, rationale, or system boundary changes. |
 | [Architecture contracts](architecture-contracts.md) | Stable AC IDs, implementation owners, invariants and verification obligations. | An architectural decision changes a boundary or invariant. |
 | [Delivery contracts](delivery-contracts.md) | Feature planning, package entry, daily resumption, evidence and handoff. | The delivery workflow changes. |
+| [Active work packages](work-packages.md) | Approved future scope and delivery sequence for partial taxonomy publication and cross-question topic reconciliation. | Package status, dependencies, acceptance evidence, or the selected design changes. |
 | [Architecture baseline review](reviews/architecture-baseline.md) | Evidence and known alignment gaps as of 2026-09-21; not an active backlog. | Preserve as a dated review; link subsequent resolution evidence when available. |
 | [API reference](api.md) | Implemented HTTP endpoints and stable request/response behaviour. | A route, schema, authentication boundary, status, or compatibility behaviour changes. |
 | [Operations](operations.md) | Implemented deployment, migration, worker, recovery, backup, and diagnostic procedures. | Compose, configuration, migrations, queues, recovery, or operational security changes. |
@@ -29,9 +31,14 @@ short contract in the delivery guide. Boundary changes use the
 
 ## Current delivery pipeline
 
-There is no active work-package plan. The completed
-[taxonomy recovery and lifecycle repair plan](archive/taxonomy-recovery-and-lifecycle-repair-work-packages.md)
-records diagnosis, implementation, integrated verification, and the 2026-09-24
+The active [partial-taxonomy and reconciled-topic plan](work-packages.md)
+records the approved future direction and package sequence for answer-focused
+clustering, LLM topic labelling, cross-question equivalence reconciliation,
+optional themes, and truthful partial publication. It is planning only: none of
+that runtime behavior is implemented by the plan. PTR-0 is the next ready
+calibration package. The completed [taxonomy recovery and lifecycle repair
+plan](archive/taxonomy-recovery-and-lifecycle-repair-work-packages.md) records
+diagnosis, implementation, integrated verification, and the 2026-09-24
 backup-first recovery of the affected local installation.
 Current-state references describe automatic taxonomy delivery as implemented:
 eligible evidence creates a durable candidate, the scheduler processes it,
@@ -101,10 +108,13 @@ affected. In particular:
 | Scope, dependency, status, completion evidence, or future work | Current work packages |
 | Completion, deferral, or replacement of a plan | Current work packages and archive index |
 
-Reference text must describe implemented behaviour, not a proposed design. Put
-future implementation scope in the current work-package document; proposed
-decisions and review findings must be clearly labelled as such. Archive documents retain
-historical context but do not override current reference documentation.
+Current state, API, operations, and surface-specific reference text must
+describe implemented behaviour, not a proposed design. Architecture describes
+the accepted desired design without per-step delivery labels; the current
+work-package document owns delivery status, sequence, and acceptance evidence.
+Proposed decisions and review findings must be clearly labelled as such.
+Archive documents retain historical context but do not override current
+reference documentation.
 
 ### Required documentation checks
 

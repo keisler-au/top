@@ -1,7 +1,7 @@
 # Architecture contracts
 
 These are normative requirements for new and changed implementation. The
-[architecture reference](architecture.md) describes the running design;
+[architecture reference](architecture.md) describes the accepted desired design;
 [the baseline review](reviews/architecture-baseline.md) distinguishes verified
 structure from known gaps. These contracts do not claim every existing path
 already complies. Their initial baseline is the working tree reviewed on
