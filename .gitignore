@@ -8,3 +8,5 @@ __pycache__/
 .ruff_cache/
 node_modules/
 dist/
+.dev-build-next/
+.dev-build-previous/

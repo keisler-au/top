@@ -80,8 +80,13 @@ async function serveStatic(request, response) {
   createReadStream(filePath).pipe(response);
 }
 
-createServer(async (request, response) => {
+const server = createServer(async (request, response) => {
   try {
+    if (request.url === "/healthz") {
+      response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      response.end('{"status":"ok"}');
+      return;
+    }
     if (request.url?.startsWith("/api/")) {
       request.url = request.url.slice(4) || "/";
       await proxyApi(request, response);
@@ -92,6 +97,7 @@ createServer(async (request, response) => {
     response.writeHead(502, { "Content-Type": "text/plain; charset=utf-8" });
     response.end(error instanceof Error ? error.message : "Request failed");
   }
-}).listen(port, () => {
-  process.stdout.write(`Dashboard available at http://localhost:${port}\n`);
+});
+server.listen(port, () => {
+  process.stdout.write(`Dashboard available at http://localhost:${server.address().port}\n`);
 });

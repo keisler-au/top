@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 import asyncpg
@@ -13,13 +14,34 @@ from triage_processor.clients.ollama import (
 )
 from triage_processor.config import DATABASE_URL
 from triage_processor.observability import configure_logging
-from triage_processor.job_queue import QueueSettings, run_job_loop
+from triage_processor.job_queue import (
+    Job,
+    QueueSettings,
+    complete_job_in_transaction,
+    require_job_lease,
+    run_job_loop,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 
 class TextEmbedder(Protocol):
     async def embed(self, texts: Sequence[str]) -> list[list[float]]: ...
+
+
+@dataclass(frozen=True)
+class EmbeddingTarget:
+    segment_id: int | None
+    text: str
+
+
+@dataclass(frozen=True)
+class EmbeddingWork:
+    input_id: int
+    original_text: str
+    question_id: int
+    question_text: str
+    targets: tuple[EmbeddingTarget, ...]
 
 
 def build_embedding_input(
@@ -74,48 +96,63 @@ async def process_next_input(
     batch_size: int,
     embedding_model: str,
     input_id: int | None = None,
+    job: Job | None = None,
 ) -> bool:
     if not embedding_model.strip():
         raise ValueError("embedding_model cannot be blank")
 
     async with pool.acquire() as connection:
-        async with connection.transaction():
-            if input_id is None:
-                original = await connection.fetchrow(
+        if job is not None:
+            original = await connection.fetchrow(
+                """
+                SELECT inputs.id, inputs.original_text, inputs.question_id,
+                       questions.question_text
+                FROM worker_jobs AS jobs
+                JOIN original_inputs AS inputs ON inputs.id = jobs.original_input_id
+                JOIN questions ON questions.id = inputs.question_id
+                WHERE jobs.id = $1 AND jobs.job_type = 'embeddings'
+                  AND jobs.status = 'processing' AND jobs.locked_by = $2
+                  AND inputs.id = $3 AND inputs.status = 'ready_for_embedding'
+                """,
+                job.id,
+                job.locked_by,
+                job.original_input_id,
+            )
+        elif input_id is None:
+            original = await connection.fetchrow(
                     """
                     SELECT
                         inputs.id,
                         inputs.original_text,
+                        inputs.question_id,
                         questions.question_text
                     FROM original_inputs AS inputs
-                    LEFT JOIN questions
+                    JOIN questions
                         ON questions.id = inputs.question_id
                     WHERE inputs.status = 'ready_for_embedding'
                     ORDER BY inputs.id
-                    FOR UPDATE OF inputs SKIP LOCKED
                     LIMIT 1
                     """
                 )
-            else:
-                original = await connection.fetchrow(
+        else:
+            original = await connection.fetchrow(
                     """
                     SELECT
                         inputs.id,
                         inputs.original_text,
+                        inputs.question_id,
                         questions.question_text
                     FROM original_inputs AS inputs
-                    LEFT JOIN questions
+                    JOIN questions
                         ON questions.id = inputs.question_id
                     WHERE inputs.id = $1
                         AND inputs.status = 'ready_for_embedding'
-                    FOR UPDATE OF inputs
                     """,
                     input_id,
                 )
-            if original is None:
-                return False
-
-            segments = await connection.fetch(
+        if original is None:
+            return False
+        segments = await connection.fetch(
                 """
                 SELECT id, segment_text
                 FROM segment_inputs
@@ -125,49 +162,58 @@ async def process_next_input(
                 original["id"],
             )
 
-            question_text = original["question_text"]
-            texts = [
-                build_embedding_input(
-                    answer_text=original["original_text"],
-                    question_text=question_text,
-                )
-            ]
-            texts.extend(
-                build_embedding_input(
-                    answer_text=segment["segment_text"],
-                    question_text=question_text,
-                )
-                for segment in segments
-            )
-            embeddings = await _embed_in_batches(embedder, texts, batch_size)
-            embedding_representation = (
-                "answer-only" if question_text is None else "question-answer"
-            )
-
-            embedding_rows = [
+    work = EmbeddingWork(
+        input_id=original["id"],
+        original_text=original["original_text"],
+        question_id=original["question_id"],
+        question_text=original["question_text"],
+        targets=(EmbeddingTarget(None, original["original_text"]),)
+        + tuple(EmbeddingTarget(segment["id"], segment["segment_text"]) for segment in segments),
+    )
+    texts = [
+        build_embedding_input(answer_text=target.text, question_text=work.question_text)
+        for target in work.targets
+    ]
+    # Ollama is called after the read connection has been released.
+    embeddings = await _embed_in_batches(embedder, texts, batch_size)
+    embedding_rows = [
                 (
-                    original["id"],
-                    None,
-                    _to_pgvector(embeddings[0]),
-                    embedding_model,
-                    embedding_representation,
-                )
-            ]
-            embedding_rows.extend(
-                (
-                    None,
-                    segment["id"],
+                    work.input_id if target.segment_id is None else None,
+                    target.segment_id,
                     _to_pgvector(vector),
                     embedding_model,
-                    embedding_representation,
+                    "question-answer",
                 )
-                for segment, vector in zip(
-                    segments,
-                    embeddings[1:],
-                    strict=True,
-                )
-            )
+                for target, vector in zip(work.targets, embeddings, strict=True)
+            ]
 
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            if job is not None:
+                await require_job_lease(connection, job)
+            current = await connection.fetchrow(
+                """
+                SELECT original_text, question_id, status
+                FROM original_inputs WHERE id = $1 FOR UPDATE
+                """,
+                work.input_id,
+            )
+            if current is None or current["status"] != "ready_for_embedding":
+                raise RuntimeError("input is no longer available for embedding")
+            if current["original_text"] != work.original_text or current["question_id"] != work.question_id:
+                raise RuntimeError("input changed during embedding")
+            current_segments = await connection.fetch(
+                """SELECT id, segment_text FROM segment_inputs
+                   WHERE original_input_id = $1 ORDER BY segment_order""",
+                work.input_id,
+            )
+            expected_segments = tuple(
+                (target.segment_id, target.text)
+                for target in work.targets
+                if target.segment_id is not None
+            )
+            if tuple((row["id"], row["segment_text"]) for row in current_segments) != expected_segments:
+                raise RuntimeError("segments changed during embedding")
             await connection.executemany(
                 """
                 INSERT INTO input_embeddings (
@@ -187,12 +233,14 @@ async def process_next_input(
                 SET status = 'ready_for_analysis'
                 WHERE id = $1
                 """,
-                original["id"],
+                work.input_id,
             )
+            if job is not None:
+                await complete_job_in_transaction(connection, job)
 
             LOGGER.info(
                 "Embedded input %s: vectors=%s dimensions=%s",
-                original["id"],
+                work.input_id,
                 len(embeddings),
                 len(embeddings[0]),
             )
@@ -224,13 +272,14 @@ async def run_worker(
     )
 
     try:
-        async def handle(input_id: int) -> None:
-            await process_next_input(
+        async def handle(job: Job) -> bool:
+            return await process_next_input(
                 pool,
                 embedder,
                 batch_size=batch_size,
                 embedding_model=embedding_model,
-                input_id=input_id,
+                input_id=job.original_input_id,
+                job=job,
             )
 
         await run_job_loop(

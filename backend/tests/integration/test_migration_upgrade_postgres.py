@@ -116,6 +116,145 @@ class MigrationUpgradePostgresTests(unittest.IsolatedAsyncioTestCase):
             "SELECT count(*) FROM operations_rate_limit_windows WHERE actor_sha256=$1", actor
         ), 1)
 
+    async def test_044_fails_closed_when_historical_inputs_have_no_question(self):
+        await self.connection.execute(legacy_base_sql())
+        await self.connection.execute(
+            "INSERT INTO original_inputs(original_text,source) VALUES('Unresolved','fixture')"
+        )
+        await self.apply_from(13, 43)
+        before = await self.connection.fetch("SELECT * FROM original_inputs ORDER BY id")
+
+        with self.assertRaisesRegex(
+            asyncpg.PostgresError, "original_inputs rows have no question_id"
+        ):
+            await self.apply_from(44, 44)
+        await self.connection.execute("ROLLBACK")
+        self.assertEqual(await self.connection.fetch("SELECT * FROM original_inputs ORDER BY id"), before)
+        self.assertIsNone(await self.connection.fetchval("SELECT to_regclass(current_schema() || '.input_preparation_decisions')"))
+
+        self.assertTrue(await self.connection.fetchval(
+            "SELECT is_nullable = 'YES' FROM information_schema.columns "
+            "WHERE table_schema=current_schema() AND table_name='original_inputs' "
+            "AND column_name='question_id'"
+        ))
+
+    async def test_044_upgrades_resolved_rows_and_links_historical_segments(self):
+        await self.connection.execute(legacy_base_sql())
+        question_id = await self.connection.fetchval(
+            """INSERT INTO questions(source,form_key,question_key,question_text)
+               VALUES('fixture','form','question','What should change?') RETURNING id"""
+        )
+        input_id = await self.connection.fetchval(
+            """INSERT INTO original_inputs(original_text,source,status,question_id)
+               VALUES('First and second','fixture','ready_for_embedding',$1) RETURNING id""",
+            question_id,
+        )
+        segment_id = await self.connection.fetchval(
+            """INSERT INTO segment_inputs(original_input_id,segment_order,segment_text)
+               VALUES($1,0,'First') RETURNING id""",
+            input_id,
+        )
+        await self.apply_from(13, 44)
+
+        self.assertFalse(await self.connection.fetchval(
+            "SELECT is_nullable = 'YES' FROM information_schema.columns "
+            "WHERE table_schema=current_schema() AND table_name='original_inputs' "
+            "AND column_name='question_id'"
+        ))
+        decision = await self.connection.fetchrow(
+            """SELECT decision_source,model,prompt_version,segments
+               FROM input_preparation_decisions WHERE original_input_id=$1""",
+            input_id,
+        )
+        self.assertEqual(decision["decision_source"], "legacy-backfill")
+        self.assertEqual(decision["model"], "legacy-unrecorded")
+        self.assertEqual(json.loads(decision["segments"]), ["First"])
+        self.assertEqual(await self.connection.fetchval(
+            "SELECT preparation_decision_id FROM segment_inputs WHERE id=$1",
+            segment_id,
+        ), await self.connection.fetchval(
+            "SELECT id FROM input_preparation_decisions WHERE original_input_id=$1",
+            input_id,
+        ))
+
+    async def test_045_adds_provisional_identity_without_rewriting_old_topics(self):
+        await self.connection.execute(legacy_base_sql())
+        question_id = await self.connection.fetchval(
+            """INSERT INTO questions(source,form_key,question_key,question_text)
+               VALUES('fixture','form','question','What should change?') RETURNING id"""
+        )
+        await self.connection.execute(
+            """INSERT INTO original_inputs(original_text,source,status,question_id)
+               VALUES('Resolved','fixture','ineligible',$1)""",
+            question_id,
+        )
+        await self.apply_from(13, 45)
+        self.assertIsNotNone(await self.connection.fetchval(
+            "SELECT to_regclass('taxonomy_provisional_topics')"
+        ))
+        self.assertIsNotNone(await self.connection.fetchval(
+            """SELECT 1 FROM pg_constraint
+               WHERE conname='taxonomy_topic_naming_attempts_run_cluster_id_unique'"""
+        ))
+        self.assertEqual(await self.connection.fetchval("SELECT count(*) FROM topics"), 0)
+
+    async def test_046_upgrades_populated_runs_without_rewriting_canonical_history(self):
+        await self.connection.execute(legacy_base_sql())
+        await self.apply_from(13, 45)
+        run = await self.connection.fetchval("""INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,
+            configuration,configuration_sha256,embedding_model,embedding_representation,embedding_dimension,
+            clustering_model,topic_model,theme_model,topic_prompt_version,theme_prompt_version)
+            VALUES(CURRENT_TIMESTAMP,repeat('a',64),'{}',repeat('b',64),'fixture','question-answer',2,
+            'fixture','fixture','fixture','fixture','fixture') RETURNING id""")
+        topic = await self.connection.fetchval("INSERT INTO topics DEFAULT VALUES RETURNING id")
+        revision = await self.connection.fetchval("""INSERT INTO topic_revisions(taxonomy_run_id,topic_id,
+            cluster_key,name,normalized_name,literal_description,support_count,continuity_decision)
+            VALUES($1,$2,'legacy','Historical topic','historical topic','Historical description',0,'new') RETURNING id""", run, topic)
+        await self.connection.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1", run)
+        await self.connection.execute("UPDATE taxonomy_runs SET status='ready_for_review',completed_at=CURRENT_TIMESTAMP WHERE id=$1", run)
+        await self.connection.execute("""UPDATE taxonomy_runs SET status='published',published_at=CURRENT_TIMESTAMP,
+            decision_at=CURRENT_TIMESTAMP,decision_by='fixture' WHERE id=$1""", run)
+        active = await self.connection.fetchval("""INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,
+            configuration,configuration_sha256,embedding_model,embedding_representation,embedding_dimension,
+            clustering_model,topic_model,theme_model,topic_prompt_version,theme_prompt_version)
+            VALUES(CURRENT_TIMESTAMP,repeat('c',64),'{}',repeat('d',64),'fixture','question-answer',2,
+            'fixture','fixture','fixture','fixture','fixture') RETURNING id""")
+        before_run = await self.connection.fetchrow("SELECT * FROM taxonomy_runs WHERE id=$1", run)
+        before_revision = await self.connection.fetchrow("SELECT * FROM topic_revisions WHERE id=$1", revision)
+        await self.apply_from(46, 46)
+        self.assertEqual(await self.connection.fetchrow("SELECT * FROM taxonomy_runs WHERE id=$1", run), before_run)
+        self.assertEqual(await self.connection.fetchrow("SELECT * FROM topic_revisions WHERE id=$1", revision), before_revision)
+        self.assertEqual(await self.connection.fetchval("SELECT status FROM taxonomy_run_stages WHERE taxonomy_run_id=$1 AND stage='topic_reconciliation'", run), "completed")
+        self.assertEqual(await self.connection.fetchval("SELECT status FROM taxonomy_run_stages WHERE taxonomy_run_id=$1 AND stage='topic_reconciliation'", active), "pending")
+        self.assertEqual(await self.connection.fetchval("SELECT count(*) FROM taxonomy_canonical_topic_antecedents"), 0)
+        self.assertIsNotNone(await self.connection.fetchval("SELECT to_regclass('taxonomy_topic_reconciliation_decisions')"))
+
+    async def test_047_preserves_old_attestation_and_enables_optional_materialization(self):
+        await self.connection.execute(legacy_base_sql())
+        await self.apply_from(13, 46)
+        run = await self.connection.fetchval("""INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,
+            configuration,configuration_sha256,embedding_model,embedding_representation,embedding_dimension,
+            clustering_model,topic_model,theme_model,topic_prompt_version,theme_prompt_version)
+            VALUES(CURRENT_TIMESTAMP,repeat('a',64),'{}',repeat('b',64),'fixture','question-answer',2,
+            'fixture','fixture','fixture','fixture','fixture') RETURNING id""")
+        await self.connection.execute("""INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,
+            thresholds,threshold_version,gate_passed,failures,input_sha256)
+            VALUES($1,'{"evidence_count":4,"clustered_count":4,"noise_count":0,"naming_attempt_count":2,
+            "accepted_topic_count":2,"candidate_theme_count":0,"reconciled_theme_count":0}',
+            '{"minimum_topic_acceptance_rate":0.8}','taxonomy-release-gate-v2',FALSE,
+            ARRAY['reconciled_themes_missing'],repeat('c',64))""",run)
+        await self.connection.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1",run)
+        await self.connection.execute("UPDATE taxonomy_runs SET status='ready_for_review',completed_at=CURRENT_TIMESTAMP WHERE id=$1",run)
+        before = await self.connection.fetchrow('SELECT * FROM taxonomy_release_attestations WHERE taxonomy_run_id=$1',run)
+        publication_before = await self.connection.fetchval("SELECT pg_get_functiondef('publish_taxonomy_run(bigint,timestamptz,text,text)'::regprocedure)")
+        await self.apply_from(47,47)
+        self.assertEqual(await self.connection.fetchrow('SELECT * FROM taxonomy_release_attestations WHERE taxonomy_run_id=$1',run),before)
+        self.assertEqual(await self.connection.fetchval("SELECT pg_get_functiondef('publish_taxonomy_run(bigint,timestamptz,text,text)'::regprocedure)"),publication_before)
+        await self.connection.execute('SELECT materialize_taxonomy_theme_revisions($1)',run)
+        await self.connection.execute('SELECT materialize_taxonomy_theme_revisions($1)',run)
+        self.assertEqual(await self.connection.fetchval('SELECT count(*) FROM theme_revisions'),0)
+        self.assertEqual(json.loads(await self.connection.fetchval('SELECT taxonomy_publication_facts($1)',run))['evidence_count'],0)
+
     async def test_legacy_only_upgrade_preserves_historical_rows_and_article_output(self):
         await self.connection.execute(legacy_base_sql())
         await self.connection.execute("""
@@ -370,9 +509,15 @@ class MigrationUpgradePostgresTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("\\ir ", source, path.name)
             self.assertNotIn("COPY ", source.upper(), path.name)
 
-    async def test_first_publication_is_gate_bound_and_records_an_immutable_decision(self):
+    async def test_048_preserves_historical_publications_and_allows_explicit_rollback(self):
         await self.connection.execute(legacy_base_sql())
-        await self.apply_from(13)
+        await self.apply_from(13,43)
+        await self.connection.execute("""
+            INSERT INTO questions(source,form_key,question_key,question_text)
+            VALUES('ptr8','upgrade','access','What should improve?');
+            INSERT INTO original_inputs(original_text,source,status,question_id)
+            SELECT 'Historical resolved answer','ptr8','completed',id FROM questions WHERE source='ptr8';
+        """)
         run_id = await self.connection.fetchval("""
             INSERT INTO taxonomy_runs(source_cutoff,source_snapshot_sha256,configuration,configuration_sha256,
               embedding_model,embedding_representation,embedding_dimension,clustering_model,topic_model,theme_model,topic_prompt_version,theme_prompt_version)
@@ -430,6 +575,31 @@ class MigrationUpgradePostgresTests(unittest.IsolatedAsyncioTestCase):
         newer_expected = await self.connection.fetchval("SELECT updated_at FROM taxonomy_runs WHERE id=$1", newer)
         await self.connection.execute("INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,thresholds,threshold_version,gate_passed,input_sha256) VALUES($1,'{}','{}','fixture-v1',TRUE,repeat('f',64))", newer)
         await self.connection.fetchval("SELECT publish_taxonomy_run($1,$2,'fixture')", newer, newer_expected)
+        # PTR-8 upgrades the full 044–048 boundary with resolved source data,
+        # old publications/attestations and an approved public article together.
+        stable_theme = await self.connection.fetchval("SELECT theme_id FROM theme_revisions WHERE taxonomy_run_id=$1", run_id)
+        article = await self.connection.fetchval("INSERT INTO articles(title,status,approved_at) VALUES('Historical article','approved',CURRENT_TIMESTAMP) RETURNING id")
+        revision = await self.connection.fetchval("""INSERT INTO article_revisions(article_id,revision_number,title,structured_content,rendered_html)
+            VALUES($1,1,'Historical article','{}','<p>Preserved approved output</p>') RETURNING id""", article)
+        await self.connection.execute("UPDATE articles SET current_revision_id=$2 WHERE id=$1", article, revision)
+        await self.connection.execute("INSERT INTO article_themes(article_id,stable_theme_id,theme_name_snapshot) VALUES($1,$2,'Fixture theme')", article, stable_theme)
+        await self.connection.execute("""INSERT INTO article_publications(article_id,approved_revision_id,slug,first_published_at,updated_at)
+            VALUES($1,$2,'historical-upgrade',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""", article, revision)
+        await self.connection.execute("INSERT INTO article_publication_themes VALUES($1,$2,$3,'Fixture theme')", article, revision, stable_theme)
+        tables = ('original_inputs','taxonomy_runs','topic_revisions','theme_revisions',
+                  'taxonomy_release_attestations','taxonomy_publication_decisions','articles',
+                  'article_revisions','article_themes','article_publications','article_publication_themes')
+        async def historical_rows():
+            return {table: await self.connection.fetchval(
+                f"SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),'[]')::text FROM {table} t")
+                    for table in tables}
+        frozen = await historical_rows()
+        before = await self.connection.fetch("SELECT row_to_json(d)::text FROM taxonomy_publication_decisions d ORDER BY id")
+        await self.apply_from(44,48)
+        self.assertEqual(await historical_rows(), frozen)
+        self.assertEqual(await self.connection.fetch("SELECT row_to_json(d)::text FROM taxonomy_publication_decisions d ORDER BY id"), before)
+        with self.assertRaisesRegex(asyncpg.PostgresError, "current-version"):
+            await self.connection.execute("SELECT require_partial_taxonomy_attestation($1)",run_id)
         await self.connection.fetchval("SELECT rollback_taxonomy_run($1,'fixture','rollback proof')", run_id)
         self.assertEqual(await self.connection.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", run_id), "published")
         self.assertEqual(await self.connection.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", newer), "superseded")

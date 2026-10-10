@@ -45,7 +45,7 @@ export function dashboardState(parameters: URLSearchParams): DashboardState {
     ? requestedPage
     : 1;
   return {
-    type: rawType && taxonomyTypes.has(rawType) ? rawType : "theme",
+    type: rawType && taxonomyTypes.has(rawType) ? rawType : "topic",
     search: parameters.get("search")?.trim() ?? "",
     sort: rawSort && sorts.has(rawSort) ? rawSort : "evidence",
     direction: rawDirection && directions.has(rawDirection)

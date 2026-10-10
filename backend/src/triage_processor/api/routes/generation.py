@@ -325,7 +325,7 @@ async def create_generation_job(
         taxonomy_key = payload.taxonomy_key.strip()
 
     async with request.app.state.db_pool.acquire() as connection:
-        async with connection.transaction():
+        async with connection.transaction(isolation="repeatable_read"):
             template = await connection.fetchrow(
                 """
                 SELECT versions.id
@@ -369,7 +369,7 @@ async def create_generation_job(
                     template_version_id, editorial_guidance, status_url, taxonomy_run_id, stable_theme_id
                 ) VALUES ($1, $2, $3, $4, $5, $6, 'pending',
                     (SELECT id FROM taxonomy_runs WHERE status='published'),
-                    CASE WHEN $2='theme' THEN $3::bigint ELSE NULL END)
+                    CASE WHEN $2='theme' THEN $3::text::bigint ELSE NULL END)
                 RETURNING id
                 """,
                 payload.strategy,

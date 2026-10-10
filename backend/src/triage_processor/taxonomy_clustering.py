@@ -13,7 +13,17 @@ from typing import Sequence
 import asyncpg
 
 from triage_processor.config import DATABASE_URL
-from triage_processor.taxonomy_experiment import hdbscan_clusters, parse_pgvector
+from triage_processor.taxonomy_experiment import (
+    POLICY_VERSION,
+    PROMPT_INPUT_MAX_BYTES,
+    ClusterResult,
+    EvidenceUnit,
+    cluster_diagnostics,
+    cluster_passes_policy,
+    hdbscan_clusters,
+    parse_pgvector,
+    select_bounded_packet,
+)
 from triage_processor.taxonomy_stages import ClaimedStage, require_stage_lease
 from triage_processor.taxonomy_snapshots import compatible_representation
 
@@ -22,15 +32,24 @@ from triage_processor.taxonomy_snapshots import compatible_representation
 class ClusterEvidence:
     evidence_id: int
     original_input_id: int
+    question_id: int
+    question_text: str
+    answer_text: str
     vector: tuple[float, ...]
 
 
 @dataclass(frozen=True)
 class CandidateCluster:
+    question_id: int
     algorithm_label: int
     member_indexes: tuple[int, ...]
     centroid: tuple[float, ...]
     representatives: tuple[tuple[int, str], ...]
+    diagnostics: dict[str, object]
+    eligible: bool
+    failure_reasons: tuple[str, ...]
+    packet_serialized_bytes: int
+    unique_original_count: int
 
 
 @dataclass(frozen=True)
@@ -62,48 +81,102 @@ def make_cluster_plan(
         raise ValueError("taxonomy run has inconsistent vector dimensions")
     if any(not any(value != 0 for value in item.vector) for item in evidence):
         raise ValueError("taxonomy run contains a zero-length embedding")
-    result = hdbscan_clusters(
-        [item.vector for item in evidence],
-        min_cluster_size=min_cluster_size,
-        min_samples=min_samples,
-    )
-    probabilities = result.membership_probabilities or tuple(
-        0.0 if label == -1 else 1.0 for label in result.labels
-    )
-    if len(probabilities) != len(evidence) or any(
-        probability < 0 or probability > 1 for probability in probabilities
-    ):
-        raise ValueError("clustering returned invalid membership probabilities")
-    grouped: dict[int, list[int]] = defaultdict(list)
-    for index, label in enumerate(result.labels):
-        grouped[label].append(index)
     clusters: list[CandidateCluster] = []
     noise_indexes: list[int] = []
-    for label, indexes in sorted(grouped.items()):
-        # A valid persisted cluster requires at least two members.  HDBSCAN
-        # normally guarantees this, but retaining the guard makes malformed
-        # or substituted deterministic fixtures safe to persist as noise.
-        if label == -1 or len(indexes) < 2:
-            noise_indexes.extend(indexes)
+    probabilities = [0.0] * len(evidence)
+    question_scopes: dict[int, list[int]] = defaultdict(list)
+    for index, item in enumerate(evidence):
+        question_scopes[item.question_id].append(index)
+
+    for question_id, scope_indexes in sorted(question_scopes.items()):
+        if len(scope_indexes) < min_cluster_size:
+            noise_indexes.extend(scope_indexes)
             continue
-        centroid = _normalise(tuple(
-            sum(evidence[index].vector[axis] for index in indexes)
-            for axis in range(len(evidence[indexes[0]].vector))
-        ))
-        ordered = sorted(indexes, key=lambda index: (-_similarity(evidence[index].vector, centroid), evidence[index].evidence_id))
-        selected: list[int] = []
-        originals: set[int] = set()
-        for index in ordered:
-            if evidence[index].original_input_id not in originals:
-                selected.append(index)
-                originals.add(evidence[index].original_input_id)
-            if len(selected) == 3:
-                break
-        remaining = [index for index in indexes if evidence[index].original_input_id not in originals]
-        if remaining and selected:
-            selected.append(min(remaining, key=lambda index: (max(_similarity(evidence[index].vector, evidence[chosen].vector) for chosen in selected), evidence[index].evidence_id)))
-        representatives = tuple((index, "central" if position < min(3, len(selected)) else "diverse") for position, index in enumerate(selected))
-        clusters.append(CandidateCluster(label, tuple(indexes), centroid, representatives))
+        result = hdbscan_clusters(
+            [evidence[index].vector for index in scope_indexes],
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+        )
+        scope_probabilities = result.membership_probabilities or tuple(
+            0.0 if label == -1 else 1.0 for label in result.labels
+        )
+        if len(scope_probabilities) != len(scope_indexes) or any(
+            not math.isfinite(value) or value < 0 or value > 1
+            for value in scope_probabilities
+        ):
+            raise ValueError("clustering returned invalid membership probabilities")
+        for local_index, probability in enumerate(scope_probabilities):
+            probabilities[scope_indexes[local_index]] = probability
+        scope_diagnostics = cluster_diagnostics(
+            [evidence[index].vector for index in scope_indexes],
+            result.labels,
+            scope_probabilities,
+            [result.labels],
+            result.cluster_persistence,
+        )
+        grouped: dict[int, list[int]] = defaultdict(list)
+        for local_index, label in enumerate(result.labels):
+            grouped[label].append(scope_indexes[local_index])
+        for label, indexes in sorted(grouped.items()):
+            if label == -1 or len(indexes) < 2:
+                noise_indexes.extend(indexes)
+                continue
+            centroid = _normalise(tuple(
+                sum(evidence[index].vector[axis] for index in indexes)
+                for axis in range(len(evidence[indexes[0]].vector))
+            ))
+            packet_evidence = [
+                EvidenceUnit(
+                    evidence_id=str(item.evidence_id),
+                    original_input_id=item.original_input_id,
+                    segment_input_id=None,
+                    answer_text=item.answer_text,
+                    question_text=item.question_text,
+                    created_at="",
+                    vectors={"selected": list(item.vector)},
+                )
+                for item in evidence
+            ]
+            packet = select_bounded_packet(
+                packet_evidence,
+                [item.vector for item in evidence],
+                indexes,
+                maximum_bytes=PROMPT_INPUT_MAX_BYTES,
+            )
+            by_id = {str(item.evidence_id): index for index, item in enumerate(evidence)}
+            representatives = tuple(
+                (by_id[evidence_id], kind)
+                for evidence_id, kind in zip(
+                    packet["evidence_ids"], packet["selection_kinds"], strict=True
+                )
+            )
+            local_metrics = dict(scope_diagnostics[label])
+            geometry_ok, geometry_failures = cluster_passes_policy(local_metrics)
+            failures = list(geometry_failures)
+            if not packet["eligible"]:
+                failures.append(str(packet["reason"]))
+            diagnostics: dict[str, object] = {
+                "policy_version": POLICY_VERSION,
+                "algorithm": "hdbscan",
+                "metric": "euclidean",
+                "vector_dimension": len(centroid),
+                **local_metrics,
+                "packet_policy": "all<=40-or-30-central+10-diverse",
+                "packet_serialized_bytes": packet["serialized_bytes"],
+                "unique_original_count": packet["unique_original_count"],
+            }
+            clusters.append(CandidateCluster(
+                question_id=question_id,
+                algorithm_label=label,
+                member_indexes=tuple(indexes),
+                centroid=centroid,
+                representatives=representatives,
+                diagnostics=diagnostics,
+                eligible=geometry_ok and bool(packet["eligible"]),
+                failure_reasons=tuple(failures),
+                packet_serialized_bytes=int(packet["serialized_bytes"]),
+                unique_original_count=int(packet["unique_original_count"]),
+            ))
     return ClusterPlan(
         tuple(clusters), tuple(sorted(noise_indexes)), tuple(probabilities)
     )
@@ -119,10 +192,16 @@ async def load_run_evidence(connection: asyncpg.Connection, run_id: int) -> tupl
     if run["status"] not in {"pending", "running", "failed"}:
         raise ValueError("taxonomy run is not available for clustering")
     rows = await connection.fetch("""
-        SELECT evidence.id, evidence.original_input_id, embeddings.embedding::TEXT AS embedding,
+        SELECT evidence.id, evidence.original_input_id, inputs.question_id,
+               questions.question_text,
+               COALESCE(segments.segment_text, inputs.original_text) AS answer_text,
+               embeddings.embedding::TEXT AS embedding,
                embeddings.embedding_model, embeddings.embedding_representation
         FROM taxonomy_run_evidence AS evidence
         JOIN input_embeddings AS embeddings ON embeddings.id=evidence.embedding_id
+        JOIN original_inputs AS inputs ON inputs.id=evidence.original_input_id
+        JOIN questions ON questions.id=inputs.question_id
+        LEFT JOIN segment_inputs AS segments ON segments.id=evidence.segment_input_id
         WHERE evidence.taxonomy_run_id=$1 ORDER BY evidence.id
     """, run_id)
     if not rows:
@@ -134,7 +213,10 @@ async def load_run_evidence(connection: asyncpg.Connection, run_id: int) -> tupl
         vector = tuple(parse_pgvector(row["embedding"]))
         if len(vector) != run["embedding_dimension"]:
             raise ValueError("run evidence vector dimension does not match run provenance")
-        evidence.append(ClusterEvidence(row["id"], row["original_input_id"], vector))
+        evidence.append(ClusterEvidence(
+            row["id"], row["original_input_id"], row["question_id"],
+            row["question_text"], row["answer_text"], vector,
+        ))
     configuration = run["configuration"]
     if isinstance(configuration, str):
         configuration = json.loads(configuration)
@@ -143,7 +225,9 @@ async def load_run_evidence(connection: asyncpg.Connection, run_id: int) -> tupl
     config = configuration.get("clustering", {})
     if not isinstance(config, dict):
         raise ValueError("taxonomy clustering configuration is not an object")
-    return evidence, {"min_cluster_size": int(config.get("min_cluster_size", 3)), "min_samples": int(config.get("min_samples", 2))}
+    if configuration.get("cluster_policy_version") != POLICY_VERSION:
+        raise ValueError("taxonomy run does not select partial-topic-policy/v1")
+    return evidence, {"min_cluster_size": int(config.get("min_cluster_size", 2)), "min_samples": int(config.get("min_samples", 1))}
 
 
 def _vector(value: Sequence[float]) -> str:
@@ -160,9 +244,17 @@ async def persist_cluster_plan(connection: asyncpg.Connection, run_id: int, evid
         return
     for cluster in plan.clusters:
         cluster_id = await connection.fetchval("""
-            INSERT INTO taxonomy_cluster_candidates(taxonomy_run_id,cluster_key,algorithm_label,member_count,centroid,diagnostics)
-            VALUES($1,$2,$3,$4,$5::vector,$6::jsonb) RETURNING id
-        """, run_id, f"hdbscan:{cluster.algorithm_label}", cluster.algorithm_label, len(cluster.member_indexes), _vector(cluster.centroid), json.dumps({"algorithm": "hdbscan", "metric": "euclidean", "vector_dimension": len(cluster.centroid), "representative_policy": {"central_count": 3, "diverse_count": 1}}))
+            INSERT INTO taxonomy_cluster_candidates(
+                taxonomy_run_id,cluster_key,question_id,algorithm_label,
+                member_count,centroid,diagnostics,policy_version,eligible,
+                failure_reasons,packet_serialized_bytes,unique_original_count
+            ) VALUES($1,$2,$3,$4,$5,$6::vector,$7::jsonb,$8,$9,$10,$11,$12)
+            RETURNING id
+        """, run_id, f"question:{cluster.question_id}:hdbscan:{cluster.algorithm_label}",
+             cluster.question_id, cluster.algorithm_label, len(cluster.member_indexes),
+             _vector(cluster.centroid), json.dumps(cluster.diagnostics), POLICY_VERSION,
+             cluster.eligible, list(cluster.failure_reasons),
+             cluster.packet_serialized_bytes, cluster.unique_original_count)
         for index in cluster.member_indexes:
             await connection.execute("""
                 INSERT INTO taxonomy_cluster_memberships(taxonomy_run_id,cluster_candidate_id,evidence_id,membership_confidence,decision)

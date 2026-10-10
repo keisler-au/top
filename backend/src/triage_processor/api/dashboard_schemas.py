@@ -11,6 +11,10 @@ RecommendationStrategy = Literal["most-evidence", "least-covered"]
 
 class DashboardSummaryResponse(BaseModel):
     evidence_count: int = 0
+    evidence_with_topic_count: int = 0
+    evidence_without_topic_count: int = 0
+    topic_coverage: Literal["full", "partial"] = "full"
+    published_taxonomy_run_id: int | None = None
     theme_count: int = 0
     topic_count: int = 0
     article_count: int = 0

@@ -48,9 +48,9 @@ async def require_operator(request: Request, *, mutation: bool) -> None:
         )
 
     presented = _presented_token(request)
-    allowed = hmac.compare_digest(presented, mutation_token)
+    allowed = bool(presented and mutation_token) and hmac.compare_digest(presented, mutation_token)
     if not mutation:
-        allowed = allowed or hmac.compare_digest(presented, review_token)
+        allowed = allowed or (bool(presented and review_token) and hmac.compare_digest(presented, review_token))
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

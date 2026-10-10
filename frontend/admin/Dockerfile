@@ -1,4 +1,4 @@
-FROM node:22-alpine AS build
+FROM node:22-alpine AS development
 
 WORKDIR /app
 
@@ -6,6 +6,9 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
+CMD ["npm", "run", "dev"]
+
+FROM development AS build
 RUN npm run typecheck && npm test
 
 FROM nginx:1.27-alpine

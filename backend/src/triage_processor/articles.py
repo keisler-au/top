@@ -145,14 +145,14 @@ async def create_article_record(
     if not published and taxonomy_run_id is None:
         raise ValueError("taxonomy is unavailable")
     published_run_id = taxonomy_run_id or await connection.fetchval("SELECT id FROM taxonomy_runs WHERE status = 'published'")
-    if published:
+    if published_run_id is not None:
         for topic_key, _topic_name in normalized_topics:
             topic_id = await connection.fetchval(
                 """
                 SELECT revisions.topic_id
                 FROM taxonomy_runs run
                 JOIN topic_revisions revisions ON revisions.taxonomy_run_id = run.id
-                WHERE run.status = 'published'
+                WHERE run.id = $2 AND run.status IN ('published','superseded')
                   AND (
                     revisions.normalized_name = $1
                     OR EXISTS (
@@ -165,7 +165,7 @@ async def create_article_record(
                 ORDER BY revisions.id
                 LIMIT 1
                 """,
-                topic_key,
+                topic_key, published_run_id,
             )
             if topic_id is None:
                 raise ValueError("article topic is outside the published taxonomy")
@@ -245,9 +245,10 @@ async def create_article_record(
             segment_input_id,
             evidence_order,
             citation_id,
-            topic_key
+            topic_key,
+            taxonomy_run_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         """,
         [
             (
@@ -257,6 +258,7 @@ async def create_article_record(
                 order,
                 citations[order],
                 item.topic_key,
+                published_run_id,
             )
             for order, item in enumerate(evidence)
         ],

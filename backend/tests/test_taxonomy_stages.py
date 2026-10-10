@@ -133,7 +133,7 @@ class TaxonomyStageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("FOR UPDATE SKIP LOCKED", query)
         self.assertIn("predecessor.status <> 'completed'", query)
         self.assertEqual(values[1:3], ("worker-a", 120))
-        self.assertEqual(values[3], ["clustering", "topic_naming", "theme_inference", "theme_reconciliation", "quality", "ready_for_publication"])
+        self.assertEqual(values[3], ["clustering", "topic_naming", "topic_reconciliation", "theme_inference", "theme_reconciliation", "quality", "ready_for_publication"])
 
     async def test_completion_and_failure_are_bound_to_current_owner(self):
         stage = ClaimedStage(4, 9, "clustering", 2, "worker-a")

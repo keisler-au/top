@@ -6,6 +6,9 @@ A plan enters this directory only after its final status and archive reason are 
 
 | Archived document | Final status | Archive reason |
 | --- | --- | --- |
+| [Streamlined local development](streamlined-local-development-work-packages.md) | Complete | DEV-A1–A4 verified and activated locally on 2026-10-10; all-feature default startup, source reloads, 304 backend and 54 frontend tests. Source uncommitted/unmerged. |
+| [Inputs attribute filtering](inputs-attribute-filter-work-packages.md) | Complete | IF-A1–A3 verified on 2026-10-10 with frontend and PostgreSQL/API evidence; source not merged or deployed. |
+| [Partial taxonomy and reconciled topics](partial-taxonomy-and-reconciled-topic-work-packages.md) | Complete | PTR-0–PTR-8 and PTR-F1–F6 verified on 2026-10-10; fresh/populated PostgreSQL, full Sheets/API lifecycle, frontend and public edge. Source is not merged or deployed. |
 | [Taxonomy recovery and lifecycle repair](taxonomy-recovery-and-lifecycle-repair-work-packages.md) | Complete | TR-0–TR-3 repaired cumulative automation and lifecycle diagnostics, added full Compose acceptance, and recovered the affected local installation with immutable gate state preserved. |
 | [Question-context implementation plan](question-context-implementation-plan.md) | Implemented | Its work shipped; reference behaviour is now in the architecture, API, and operations documents. |
 | [Taxonomy operational-reliability plan](taxonomy-operational-reliability-work-packages.md) | Superseded | It stopped short of incremental-taxonomy retirement. |

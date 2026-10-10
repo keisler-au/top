@@ -58,7 +58,7 @@ export function generationState(parameters: URLSearchParams): GenerationState {
   const strategy = rawStrategy && strategies.has(rawStrategy)
     ? rawStrategy
     : "specific";
-  const type: TaxonomyType = rawType === "topic" ? "topic" : "theme";
+  const type: TaxonomyType = rawType === "theme" ? "theme" : "topic";
   let step = rawStep && steps.has(rawStep) ? rawStep : "strategy";
   if (jobId !== null) {
     step = "progress";

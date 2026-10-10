@@ -22,6 +22,10 @@ class AsyncContext:
 
 class FakeConnection:
     def __init__(self, row):
+        if row is not None:
+            row.setdefault("question_id", 1)
+            row.setdefault("question_text", "What is your answer?")
+            row.setdefault("status", "new")
         self.row = row
         self.inserted_segments = []
         self.executed = []
@@ -35,6 +39,9 @@ class FakeConnection:
         self.fetchrow_queries.append(query)
         self.fetchrow_values.append(values)
         return self.row
+
+    async def fetchval(self, query, *values):
+        return 99
 
     async def executemany(self, query, values):
         self.inserted_segments.extend(values)
@@ -162,11 +169,11 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(processed)
-        self.assertEqual(connection.fetchrow_values, [(42,)])
+        self.assertEqual(connection.fetchrow_values, [(42,), (42,)])
         self.assertEqual(segmenter.received_text, "Two topics")
         self.assertEqual(
             connection.inserted_segments,
-            [(42, 0, "First topic"), (42, 1, "Second topic")],
+            [(42, 99, 0, "First topic"), (42, 99, 1, "Second topic")],
         )
         self.assertEqual(connection.executed[-1], (42, "ready_for_embedding"))
 
@@ -198,7 +205,8 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
             connection.executed[-1],
             (43, "ready_for_embedding"),
         )
-        self.assertIn("LEFT JOIN questions", connection.fetchrow_queries[0])
+        self.assertIn("JOIN questions", connection.fetchrow_queries[0])
+        self.assertNotIn("LEFT JOIN questions", connection.fetchrow_queries[0])
 
     async def test_contextual_segments_contain_only_answer_content(self):
         connection = FakeConnection(
@@ -219,7 +227,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             connection.inserted_segments,
-            [(44, 0, "Price"), (44, 1, "Delivery times")],
+            [(44, 99, 0, "Price"), (44, 99, 1, "Delivery times")],
         )
         self.assertNotIn(
             connection.row["question_text"],
@@ -286,7 +294,7 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(decision.segments, [])
 
-    async def test_dependent_qualifier_triggers_corrective_retry(self):
+    async def test_dependent_opener_is_not_rejected_by_code(self):
         answer = (
             "A large indoor climbing hall that caters to beginners "
             "and experienced climbers."
@@ -317,9 +325,14 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         )
         await client.close()
 
-        self.assertEqual(decision.segments, [])
-        correction = json.loads(structured_client.user_contents[1])["correction"]
-        self.assertIn("dependent clause", correction["validation_errors"][0])
+        self.assertEqual(
+            decision.segments,
+            [
+                "A large indoor climbing hall",
+                "that caters to beginners and experienced climbers",
+            ],
+        )
+        self.assertEqual(len(structured_client.user_contents), 1)
 
     def test_rejects_segments_for_ineligible_input(self):
         with self.assertRaises(ValueError):

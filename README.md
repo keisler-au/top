@@ -6,8 +6,8 @@ immutable, run-scoped taxonomy with a local LLM.
 ## Objective
 
 Build a local system that captures user inputs, identifies distinct points
-within them, creates semantic embeddings, and publishes one reviewed batch
-taxonomy across multiple inputs.
+within them, creates contextual embeddings, and automatically publishes one quality-gated
+batch taxonomy across multiple inputs. Articles require separate human approval.
 
 The original input remains the source of truth. LLM outputs are stored as system-generated classifications and suggestions.
 
@@ -24,7 +24,7 @@ The original input remains the source of truth. LLM outputs are stored as system
 Input received
 → saved unchanged in PostgreSQL
 → eligibility and segmentation
-→ full-input and segment embeddings
+→ question-answer embeddings for each original answer or its segments
 → immutable batch snapshot
 → automatic snapshot, leased taxonomy stages, and quality-gated publication
 → evidence-grounded article generation
@@ -46,7 +46,8 @@ Processes new inputs.
 
 Processes eligible inputs.
 
-* Send the full input and its segments to the embedding model.
+* Send each answer, or each segment when split, with immutable question wording
+  to the embedding model.
 * Receive vectors from Ollama.
 * Save vectors in PostgreSQL using pgvector.
 * Mark the input ready for analysis.
@@ -56,9 +57,14 @@ The embedding model does not access the database directly.
 ### Taxonomy scheduler and article generation
 
 The taxonomy scheduler automatically snapshots eligible evidence, processes
-frozen run stages (clustering, topic naming, theme inference, reconciliation,
-and quality) under durable leases, and publishes only a gate-qualified run. It
-never uses per-input topic/theme jobs. The article-generation worker:
+eight frozen run stages (snapshot, clustering, provisional naming, topic
+reconciliation, theme inference, theme reconciliation, quality, and publication
+readiness) under durable leases, and publishes only a gate-qualified run. It
+never uses per-input topic/theme jobs. Equivalent topics across questions merge
+into canonical topics; related concepts remain distinct and may share a theme.
+Coverage reports evidence with and without topics. Valid partial runs and
+zero-theme runs can publish. Current input arrays reflect one published run;
+historical evidence and approved displays remain frozen. The article-generation worker:
 
 Processes durable generation jobs independently of the evidence pipeline.
 
@@ -77,18 +83,31 @@ Topic = what an input or segment is about
 Theme = what multiple related inputs are collectively saying
 ```
 
-Question context is normalized in the immutable `questions` table. The
+Question context is required and normalized in the immutable `questions` table. The
 identity `(source, form_key, question_key, question_version)` preserves the
-exact question wording used to interpret an answer. Contextual answers embed
-the question and answer together; generic inputs retain answer-only behavior.
+exact question wording used to interpret an answer. Every eligible answer and
+segment embeds the question and answer together.
 
 Topics and themes are run-scoped revisions with durable stable identities.
 The sole published run is the source for all taxonomy readers and generation.
 Before first publication, the dashboard reports the newest candidate's
 processing, terminal failure, or failed quality gate with bounded status codes.
 Automatic replacement candidates in current source recluster all eligible
-canonical evidence, including generic and contextual answers embedded by one
-model and dimension. The current source and migrations 041–043 have fresh,
+canonical evidence within immutable question scopes using one model and
+dimension. Eligible clusters use a versioned structured naming prompt and
+become immutable provisional topics only after shape and exact evidence-link
+validation; word overlap does not decide semantic validity. Migration 044 refuses to apply while any historical input lacks an
+authoritative question; audit those rows before upgrading. Migration 045 adds
+the separate provisional-topic identity. Migration 046 adds immutable
+cross-question reconciliation decisions, canonical antecedents and exact
+unioned evidence memberships. Its leased stage uses bounded similarity
+shortlists, keeps related concepts separate, and records stable replacement
+lineage. PTR-3 passed disposable PostgreSQL verification on 2026-10-08;
+Optional themes now use bounded canonical topic/evidence packets. Gate v3
+permits low coverage, rejected labels and zero themes when stored evidence and
+provenance are consistent; migration 047 preserves historical attestations.
+Migration 048 implements atomic partial publication, replacement and rollback;
+PTR-5 has disposable PostgreSQL acceptance evidence. The current source and migrations 041–043 have fresh,
 populated-upgrade, and production-shaped Compose acceptance evidence. The
 affected local installation was recovered with the documented backup-first
 procedure on 2026-09-24; its failed first candidate remains quality-blocked and
@@ -120,7 +139,7 @@ nonpublishable.
 │   ├── pyproject.toml
 │   └── uv.lock
 ├── frontend/
-│   ├── admin/                # opt-in, loopback-only administrative dashboard
+│   ├── admin/                # loopback-only administrative dashboard
 │   └── public/               # dependency-free internet-facing nginx edge
 ├── infrastructure/postgres/
 ├── docs/
@@ -154,9 +173,10 @@ submission filters are scoped by both `source` and `form_key`; omitting
 `question_version` returns every version of the selected question. Results
 include resolved question context and a taxonomy projection from exactly one
 published run. `topics` and `themes` contain stable IDs plus display snapshots;
-the retired string `topic` field is never returned. `taxonomy_state` is
-`classified`, `pending_classification` for evidence after the published cutoff,
-or `taxonomy_unavailable` before the first publication.
+the retired string `topic` field and computed `taxonomy_state` are never
+returned. Evidence-processing `status` is retained. Uncovered inputs have empty
+association lists; `published_taxonomy_run_id` identifies the run used and is
+null before first publication.
 
 The endpoint uses deterministic `id` ordering with `offset`/`limit`
 pagination. The default limit is 50, the maximum limit is 100, and offset is
@@ -166,24 +186,43 @@ system's low-throughput workload.
 See [Operations](docs/operations.md) for bounded diagnostic queries and queue
 recovery guidance.
 
-The disposable automatic-taxonomy journey includes both evidence workers, a
-real Ollama embedding service, and the scheduler:
+The disposable automatic-taxonomy journey exercises Sheets/API ingestion,
+both evidence workers, real Ollama embeddings, all eight taxonomy stages,
+partial and full publication, topic generation, approval and the public edge.
+Sheets transport and structured chat responses use deterministic fixtures.
+It also verifies failed replacement, publication replay and explicit rollback.
+Start with a fresh disposable database:
 
 ```bash
 docker compose -f compose.taxonomy-journey.yaml up -d --build --wait
 docker compose -f compose.taxonomy-journey.yaml --profile acceptance run --rm journey
-docker compose -f compose.taxonomy-journey.yaml --profile acceptance down -v
+docker compose -f compose.taxonomy-journey.yaml --profile acceptance down
 ```
 
-## Run the production stack with Docker Compose
+## Run all features locally with Docker Compose
 
 The Compose stack includes PostgreSQL, Ollama, the FastAPI API, two
 evidence-preparation workers, the taxonomy scheduler, and article generation.
-Start the full stack with:
+The default local override includes the admin dashboard and Google Sheets polling.
+After the initial image build, the everyday command is:
 
 ```bash
-docker compose up --build
+docker compose up
 ```
+
+Use `docker compose up -d` to run in the background. When switching an existing
+installation to this workflow, run `docker compose up --build` once.
+Python edits reload the API and restart workers automatically; dashboard
+TypeScript, CSS and HTML edits compile automatically. Refresh the browser to
+see frontend changes. Failed dashboard compilation retains the last valid build.
+Dependencies or Dockerfile changes require rebuilding: `docker compose build
+api admin-web`, then `docker compose up`. The backend services share one
+development image. Source edits do not apply SQL migrations.
+
+The automatically merged `compose.override.yaml` requires Compose 2.24.4 or
+newer. For production images without source mounts or watchers, explicitly use
+`docker compose -f compose.yaml up -d --build`; the base file retains optional
+`admin` and `google-sheets` profiles. See [Operations](docs/operations.md).
 
 The default external service is `public-web`, bound to
 `http://localhost:${PUBLIC_PORT:-8080}`. It exposes only the public editorial
@@ -194,11 +233,18 @@ absolute `http(s)` origin (no path, query, fragment, or credentials),
 Open Graph, JSON-LD, sitemap, and robots output. Those values are deployment
 configuration, never inferred from a request Host header.
 
-The administrative dashboard is an opt-in local-only profile. Start it with
-`docker compose --profile admin up --build`; it is available at
+The administrative dashboard starts by default locally. It is available at
 `http://127.0.0.1:8081` by default and proxies its internal `/api/*` requests
 to FastAPI. PostgreSQL, Ollama, and the API remain on the internal Compose
 network. Set `ADMIN_PORT` to choose a different loopback port.
+Overview and generation default to topics, including published runs with zero
+optional themes. Inputs shows published-run associations and processing status,
+with filters for text, status, topic/theme associations, received dates and
+source/form/question/submission attributes. Filter selections persist in URLs.
+Taxonomy review loads automatically without a token and shows coverage, accepted
+topics, merge provenance and unresolved cluster reasons; canonical evidence is
+loaded explicitly. Its read APIs remain internal and blocked at the public edge.
+See the [admin reference](frontend/admin/README.md) for routes and checks.
 
 If the public edge is unhealthy, inspect it with
 `docker compose logs public-web`, then recreate only that stateless service
@@ -273,13 +319,13 @@ the batch taxonomy and legacy archive. Returning an approved article to draft
 or archiving it withdraws it; reapproval restores its permanent URL with a new
 immutable snapshot. Taxonomy changes never rewrite published article snapshots.
 
-The Google Sheets importer is optional and starts only with the
-`google-sheets` profile. Mount a service-account JSON file through
-`GOOGLE_SHEETS_CREDENTIALS_FILE`, then run:
-
-```bash
-docker compose --profile google-sheets up --build
-```
+The Google Sheets importer starts with the default local command. Place the
+service-account JSON at `.secrets/google-sheets.json`, or set
+`GOOGLE_SHEETS_CREDENTIALS_FILE` in `.env` to its path. A missing file fails
+the importer’s credential preflight. Register and enable sheets in
+the Forms tab; starting the poller does not create form registrations. Explicit
+production startup enables it with `docker compose -f compose.yaml --profile
+google-sheets up -d --build`.
 
 ### Operations summary and logs
 

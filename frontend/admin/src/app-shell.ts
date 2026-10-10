@@ -177,6 +177,10 @@ export class DashboardApp extends HTMLElement {
       page = document.createElement("articles-page");
     } else if (route.name === "article") {
       page = document.createElement("article-detail-page");
+    } else if (route.name === "taxonomy-review") {
+      page = document.createElement("taxonomy-review-page");
+    } else if (route.name === "inputs") {
+      page = document.createElement("inputs-page");
     } else if (route.name === "forms") {
       page = document.createElement("forms-page");
     } else if (route.name === "generate") {
@@ -190,6 +194,8 @@ export class DashboardApp extends HTMLElement {
       route.name !== "overview"
       && route.name !== "articles"
       && route.name !== "article"
+      && route.name !== "taxonomy-review"
+      && route.name !== "inputs"
       && route.name !== "forms"
       && route.name !== "generate"
     ) {

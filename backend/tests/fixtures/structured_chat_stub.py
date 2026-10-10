@@ -11,33 +11,61 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 
 
+MODE = "partial"
+
+
 def _response_for(system_prompt: str, user_content: str) -> dict[str, object]:
     if system_prompt.startswith("You classify submitted text"):
-        return {"eligible": True, "segments": []}
+        return {"eligible": "SPAM" not in user_content, "segments": []}
 
     payload = json.loads(user_content)
     if system_prompt.startswith("Name one evidence cluster"):
         representatives = payload["representative_evidence"]
         answer = representatives[0]["answer_text"]
-        if "bus" in answer.casefold():
+        evidence_ids = [item["evidence_id"] for item in representatives]
+        if MODE == "failed" or (MODE == "partial" and "fares" in answer.casefold()):
+            return {"name": "", "description": "", "evidence_ids": evidence_ids}
+        if "frequent" in answer.casefold():
             return {
-                "name": "Rural bus frequency",
-                "description": "More frequent buses for rural villages.",
+                "name": "Accessible transit",
+                "description": "Regular connections to essential destinations.",
+                "evidence_ids": evidence_ids,
             }
         return {
-            "name": "Neighbourhood park lighting",
-            "description": "Brighter lighting in neighbourhood parks.",
+            "name": "Affordable travel",
+            "description": "Economic access through reasonable travel costs.",
+            "evidence_ids": evidence_ids,
         }
 
-    if system_prompt.startswith("Infer a higher-order theme"):
+    if system_prompt.startswith("Infer an optional broader theme"):
         topic_ids = [topic["id"] for topic in payload["topics"]]
         return {
             "create_theme": True,
             "name": f"Community services {topic_ids[0]}",
             "description": "Community service improvements.",
-            "rationale": "The selected topic describes a requested service improvement.",
+            "rationale": "The distinct topics describe related transport access improvements.",
             "topic_revision_ids": topic_ids,
         }
+
+    if system_prompt.startswith("Reconcile provisional topics"):
+        topic_ids = [topic["id"] for topic in payload["topics"]]
+        groups = []
+        remaining = []
+        for name in sorted({topic["name"] for topic in payload["topics"]}):
+            ids = [topic["id"] for topic in payload["topics"] if topic["name"] == name]
+            if len(ids) > 1:
+                groups.append({"provisional_topic_ids": ids, "name": name,
+                               "description": "Connections to essential destinations." if name == "Accessible transit" else "Economic access through reasonable travel costs.",
+                               "rationale": "Same concept across different questions."})
+            else:
+                remaining.extend(ids)
+        return {"groups": groups, "no_merge_topic_ids": remaining}
+
+    if system_prompt.startswith("Write an evidence-grounded article"):
+        return {"title": "Community transport insight", "standfirst": "Residents describe transport needs.",
+                "sections": [{"heading": "Access", "paragraphs": ["Residents ask for better connections."],
+                              "evidence_ids": [item["evidence_id"] for item in payload["evidence"]]}],
+                "theme_ids": [], "topic_keys": [payload["target"]["key"]]}
 
     raise ValueError("unsupported structured-chat prompt")
 
@@ -53,6 +81,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b'{"status":"ok"}')
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib callback name
+        global MODE
+        if self.path == "/fixture/mode":
+            value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if value.get("mode") not in {"partial", "full", "failed"}:
+                self.send_error(422)
+                return
+            MODE = value["mode"]
+            self.send_response(204)
+            self.end_headers()
+            return
         if self.path != "/v1/chat/completions":
             self.send_error(404)
             return

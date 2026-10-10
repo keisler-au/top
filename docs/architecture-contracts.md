@@ -41,8 +41,11 @@ must move the shared schema and its consumers together, without duplicating it.
 Original text remains source evidence. Preserve original/segment provenance
 and immutable question wording. Question identity is
 `(source, form_key, question_key, question_version)`; changed wording requires
-a new version. Submission identity is scoped by source and form. Question
-context may interpret an answer but must not become invented segment content.
+a new version. Every input requires immutable question context. Submission
+identity is scoped by source and form. Question context may interpret an answer
+but must not become invented segment content. Existing rows without a question
+must be audited and resolved explicitly before a non-null schema constraint is
+applied; never invent historical question wording.
 
 Canonical taxonomy evidence selects segments instead of their parent original
 when segments exist. Snapshot selection freezes a database cutoff, membership,
@@ -50,24 +53,48 @@ embedding model/representation/dimension, and configuration/prompt provenance.
 Never silently combine incompatible vectors or change frozen membership.
 Reuse `create_taxonomy_snapshot` and published database readers. Any additional
 selector must demonstrate the same canonical semantics with shared fixtures.
-For automatic runs, `mixed` representation admits only `answer-only` and
-`question-answer` vectors from one embedding model and dimension; each vector
-retains its original representation. Manual exact-representation snapshots
-remain exact. See [ADR-0002](decisions/0002-mixed-answer-embeddings.md).
+Canonical topic evidence is the exact set union of its immutable provisional
+antecedents' cluster memberships within one run. Evidence, question and distinct
+submission counts remain separately derivable after cross-question merging.
+New automatic runs under `partial-topic-policy/v1` admit only
+`question-answer` vectors from one embedding model and dimension. The older
+`mixed` representation remains readable for frozen runs and available to the
+explicit manual snapshot compatibility path; it admits only `answer-only` and
+`question-answer` vectors and retains each vector's original representation.
+Computed cosine similarities stay within their mathematical range [-1, 1],
+including floating point accumulation for identical dense vectors. Cluster
+thresholds remain versioned; numerical bounds do not weaken those thresholds.
+See [ADR-0002](decisions/0002-mixed-answer-embeddings.md) and
+[ADR-0003](decisions/0003-partial-taxonomy-and-topic-reconciliation.md).
 
 ## AC-03 — Taxonomy visibility and publication
 
 Production taxonomy readers use one published run, or a bounded unavailable
 state before the first publication. Candidates and the legacy archive are not
 reader fallbacks. Resolve stable IDs and lineage through the existing database
-functions; labels and run-local IDs are not durable identity.
+functions and the topic reconciliation owner; labels and run-local IDs are not durable identity.
 
 Automatic publication requires the immutable server-computed passing release
-attestation and durable automation policy decision. Manual publication and
+attestation and durable automation policy decision. For new partial candidates,
+gate-v3 requires at least one nonempty canonical
+topic and internally consistent completed processing; coverage percentage,
+rejected naming attempts and zero themes are not publication blockers.
+`taxonomy_publication_facts` owns exact coverage and trace consistency for both
+quality and publication consumers. Historical attestations retain their version
+and cannot be rewritten as a new-policy pass. Manual publication and
 rollback retain their protected transitions. Use existing publication functions;
 do not set publication status directly in a new caller. Publication swaps and
-audit decisions must be atomic. Failed candidates preserve the current run;
+audit decisions must be atomic. Migration 048 serializes publication swaps,
+rejects waiting different-candidate swaps after a changed publication,
+checks current v3 thresholds and matching stored facts, and supports same-run
+replay plus audited explicit rollback. Optional themes do not block the swap.
+Failed candidates preserve the current run;
 unchanged failed evidence must not cause an unbounded automatic creation loop.
+
+Input topic/theme arrays project only that run, combine segment associations,
+remove duplicates and sort stably; `taxonomy_state` is absent while processing
+status and published-run provenance remain. Dashboard and protected operations
+coverage counts reconcile exactly to the published evidence snapshot.
 
 Each multi-query reader must preserve a consistent published-run view using
 the existing transaction/read semantics or an explicitly captured run ID.
@@ -94,6 +121,28 @@ For every changed lifecycle, specify legal transitions, idempotency keys,
 concurrent-writer behaviour, retryable versus terminal failures, and recovery.
 Do not hold a database transaction open during a model/network request. Freeze
 inputs, perform external work, then validate the claim and persist the result.
+Eligibility/segmentation records its immutable structured decision, model and
+prompt identity with its ordered segments. The evidence workers complete their
+owned queue job in the same short transaction that saves the resulting state;
+a worker that lost ownership saves nothing.
+Topic naming similarly records its model request before the external call and
+validates the current taxonomy-stage lease before atomically appending the
+response, immutable attempt, and optional provisional topic. Provisional topic
+identity is distinct from the canonical topic identity created by
+cross-question reconciliation. A response may be retried only within its
+versioned bounded structural-retry policy; committed attempts are never
+replaced.
+Cross-question reconciliation uses the durable `topic_reconciliation` stage
+and `cross-question-topic-reconciliation/v1` request identities. Model calls
+remain outside transactions; only the owned lease may persist decisions.
+Canonical revisions, immutable provisional antecedents, exact membership union,
+and lineage commit atomically. One provisional topic has one canonical owner.
+Invalid or contradictory partitions leave no canonical writes; replay and
+concurrent responses use committed decisions. See ADR-0003 and migration 046.
+Theme inference/reconciliation preserve immutable attempts and canonical topic
+links, including an explicit no-theme result. Quality records one immutable
+attestation; retries return its stored facts after claim validation. Gate hashes
+bind every computed aggregate, threshold and policy version.
 Keep the three existing job lifecycles distinct; a unification requires an
 explicit decision and migration, not a package-local abstraction.
 
@@ -104,7 +153,9 @@ snapshots retain immutable provenance. Generated articles enter editorial
 review. Explicit approval updates `article_publications` and revision-scoped
 `article_publication_themes` atomically. Reapproval preserves permanent slug
 and first-publication time. Taxonomy changes do not rewrite historical display
-snapshots.
+snapshots. Topic-targeted generation requires no themes. Job creation freezes
+target, evidence and run provenance in one database snapshot; article persistence
+resolves its topic tags against the job's recorded run through replacement.
 
 Public rendering may read the publication projection, its approved revision
 content, article status/current-revision guards, and existing stable-theme
@@ -112,8 +163,11 @@ resolution. It must not expose source evidence, prompts, generation metadata,
 editorial audit, or administrative JSON. This is an exposure boundary, not a
 claim that the renderer queries only two tables. The public nginx allowlist,
 scriptless CSP and configured canonical origin remain authoritative; never
-derive canonical URLs from the request Host. Admin remains opt-in and bound to
-loopback in Compose; internal API/database/model services stay unexposed.
+derive canonical URLs from the request Host. Admin remains bound to loopback; internal API/database/model services stay
+unexposed. The default local Compose override enables admin and Sheets with
+source reloads; explicit base-file production mode retains optional profiles
+and immutable images. [ADR-0005](decisions/0005-default-local-development.md)
+owns this runtime distinction.
 
 ## AC-06 — API and frontend compatibility
 
@@ -122,6 +176,10 @@ Backend HTTP schemas and documented behaviour own the wire contract;
 validated today. A changed payload/status/error updates backend schemas,
 `docs/api.md`, typed client, error normalization and affected pages together.
 Do not call a TypeScript cast proof of runtime compatibility.
+
+Input creation requires immutable question context. Input responses therefore
+return a non-null question ID and resolved question context. Historical rows
+must pass the AC-02 audit before a deployment may apply that database boundary.
 
 Use parameterized SQL and allowlisted sort expressions. Lists need bounded
 inputs, deterministic tie-breaking and the existing endpoint's pagination
@@ -139,9 +197,15 @@ and a decision when it changes the established frontend architecture.
 
 Reuse `api/security.py` for operator authentication and rate limiting. Every
 new or changed endpoint states its public/internal/operator classification.
-Operator reads require a nonempty configured review or mutation token; mutations
+Taxonomy run listing, run detail and topic evidence reads are internal admin
+endpoints without operator authentication or its credential rate limit (see
+[ADR-0004](decisions/0004-token-free-taxonomy-review.md)); the public edge must
+continue to deny them. Operations and legacy archive operator reads require a
+nonempty configured review or mutation token; mutations
 require a nonempty configured mutation token. Missing credentials must never
-match an empty configuration value. Internal administrative APIs are not all
+match an empty configuration value. A review-only or mutation-only
+configuration must reject an empty presented token against the unused empty
+credential slot. Internal administrative APIs are not all
 token-protected today; do not imply they are safe to expose publicly.
 
 Model output and source text are untrusted. Validate structured output,
@@ -187,3 +251,12 @@ regression tests for changed behaviour; do not add tests that merely repeat an
 implementation. Tests skipped for missing services are unverified. Ensure CI
 actually triggers on changed paths; the baseline review records current gaps.
 Full commands and package evidence rules are in the delivery contracts.
+
+The partial-taxonomy lifecycle uses `compose.taxonomy-journey.yaml` for
+Sheets/API ingestion, evidence workers, real embeddings, all eight taxonomy
+stages, partial/full publication, generation, approval and public delivery.
+External Sheets transport and structured chat are deterministic fixtures.
+`compose.test.yaml` supplies fresh-schema, populated-upgrade and focused
+publication/lease/concurrency evidence; frontend typecheck, tests and build
+verify its API consumers. These checks do not establish production-model
+semantic accuracy or authorize deployment.

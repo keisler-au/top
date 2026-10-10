@@ -93,7 +93,12 @@ class TaxonomySchedulerTests(unittest.TestCase):
         request = policy.snapshot_request(idempotency_key="automatic:auto-v2:cutoff", after_cutoff=None)
         self.assertEqual(request.configuration["automation_policy_version"], "auto-v2")
         self.assertEqual(request.configuration["clustering"]["algorithm"], policy.clustering_model)
-        self.assertEqual(request.configuration["clustering"]["min_cluster_size"], 3)
+        self.assertEqual(request.configuration["clustering"]["min_cluster_size"], 2)
+        self.assertEqual(request.configuration["clustering"]["min_samples"], 1)
+        self.assertEqual(
+            request.configuration["cluster_policy_version"],
+            "partial-topic-policy/v1",
+        )
         with self.assertRaisesRegex(ValueError, "minimum evidence"):
             AutomationPolicy(minimum_evidence=0).validate()
 

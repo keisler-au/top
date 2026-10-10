@@ -6,7 +6,6 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
-    model_validator,
 )
 
 RequiredText = Annotated[
@@ -28,15 +27,7 @@ class InputCreate(BaseModel):
     source: RequiredText
     submission_key: RequiredText | None = None
     source_record_key: RequiredText | None = None
-    question_context: QuestionContext | None = None
-
-    @model_validator(mode="after")
-    def require_question_context_for_submission(self) -> "InputCreate":
-        if self.submission_key is not None and self.question_context is None:
-            raise ValueError(
-                "submission_key is only allowed when question_context is present"
-            )
-        return self
+    question_context: QuestionContext
 
 
 class ThemeResponse(BaseModel):
@@ -61,12 +52,11 @@ class InputResponse(BaseModel):
     original_text: str
     source: str
     status: str
-    question_id: int | None
-    question_context: QuestionContext | None
+    question_id: int
+    question_context: QuestionContext
     submission_key: str | None
     source_record_key: str | None
     created_at: datetime
     topics: list[TopicResponse] = Field(default_factory=list)
     themes: list[ThemeResponse] = Field(default_factory=list)
-    taxonomy_state: str = "pending_classification"
     published_taxonomy_run_id: int | None = None

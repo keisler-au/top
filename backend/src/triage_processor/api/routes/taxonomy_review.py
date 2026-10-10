@@ -1,11 +1,14 @@
-"""Candidate-run review and bounded publication-gate operations."""
+"""Internal admin run reads and protected publication-gate mutations."""
 
 import os
+import json
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Request, status
 
 from triage_processor.api.taxonomy_review_schemas import (
+    TaxonomyClusterReview,
+    TaxonomyTopicAntecedent,
     TaxonomyRunCreate,
     TaxonomyRunCreated,
     TaxonomyRunDecision,
@@ -91,7 +94,7 @@ async def create_taxonomy_run(
         ) from error
     await reconcile_manual_snapshot(
         request.app.state.db_pool, run_id=result.id, cutoff=result.source_cutoff,
-        policy_version=os.getenv("TAXONOMY_AUTOMATION_POLICY_VERSION", "taxonomy-automation-v1"),
+        policy_version=os.getenv("TAXONOMY_AUTOMATION_POLICY_VERSION", "taxonomy-automation-v3"),
     )
     return TaxonomyRunCreated(
         id=result.id,
@@ -104,27 +107,74 @@ async def create_taxonomy_run(
     )
 
 
+@router.get("")
+async def list_taxonomy_runs(request: Request) -> list[dict]:
+    async with request.app.state.db_pool.acquire() as connection:
+        rows = await connection.fetch("SELECT id,status FROM taxonomy_runs ORDER BY id DESC LIMIT 50")
+    return [dict(row) for row in rows]
+
+
+@router.get("/{run_id}/topics/{revision_id}/evidence")
+async def review_topic_evidence(run_id: int, revision_id: int, request: Request, offset: int = 0) -> dict:
+    if not 0 <= offset <= 100000:
+        raise HTTPException(status_code=422, detail="invalid offset")
+    async with request.app.state.db_pool.acquire() as connection:
+        if not await connection.fetchval("SELECT EXISTS(SELECT 1 FROM topic_revisions WHERE taxonomy_run_id=$1 AND id=$2)",run_id,revision_id):
+            raise HTTPException(status_code=404, detail="topic not found in run")
+        rows = await connection.fetch("""SELECT e.id, e.original_input_id, e.segment_input_id,
+            COALESCE(s.segment_text,i.original_text) AS text
+            FROM topic_memberships m JOIN taxonomy_run_evidence e ON e.taxonomy_run_id=m.taxonomy_run_id AND e.id=m.evidence_id
+            JOIN original_inputs i ON i.id=e.original_input_id LEFT JOIN segment_inputs s ON s.id=e.segment_input_id
+            WHERE m.taxonomy_run_id=$1 AND m.topic_revision_id=$2 ORDER BY e.id LIMIT 50 OFFSET $3""",run_id,revision_id,offset)
+    return {"items": [dict(row) for row in rows], "offset": offset, "page_size":50}
+
+
 @router.get("/{run_id}", response_model=TaxonomyRunReview)
 async def review_taxonomy_run(run_id: int, request: Request) -> TaxonomyRunReview:
-    await require_operator(request, mutation=False)
     async with request.app.state.db_pool.acquire() as connection:
-        summary = await connection.fetchrow(_SUMMARY_SQL, run_id)
-        if summary is None:
-            raise HTTPException(status_code=404, detail="taxonomy run not found")
-        rows = await connection.fetch("""
-            SELECT revisions.id, revisions.topic_id, revisions.name,
-                   revisions.literal_description, revisions.support_count,
-                   revisions.continuity_decision,
-                   COALESCE(array_agg(representatives.evidence_id ORDER BY representatives.representative_order)
-                       FILTER (WHERE representatives.evidence_id IS NOT NULL), ARRAY[]::bigint[]) AS representative_evidence_ids
-            FROM topic_revisions revisions
-            LEFT JOIN topic_representative_evidence representatives
-              ON representatives.topic_revision_id = revisions.id
-             AND representatives.taxonomy_run_id = revisions.taxonomy_run_id
-            WHERE revisions.taxonomy_run_id = $1
-            GROUP BY revisions.id
-            ORDER BY revisions.name COLLATE "C", revisions.id
-        """, run_id)
+        async with connection.transaction(isolation='repeatable_read', readonly=True):
+            summary = await connection.fetchrow(_SUMMARY_SQL, run_id)
+            if summary is None:
+                raise HTTPException(status_code=404, detail="taxonomy run not found")
+            rows = await connection.fetch("""
+                SELECT revisions.id, revisions.topic_id, revisions.name,
+                       revisions.literal_description, revisions.support_count,
+                       revisions.continuity_decision,
+                       COALESCE(array_agg(representatives.evidence_id ORDER BY representatives.representative_order)
+                           FILTER (WHERE representatives.evidence_id IS NOT NULL), ARRAY[]::bigint[]) AS representative_evidence_ids
+                FROM topic_revisions revisions
+                LEFT JOIN topic_representative_evidence representatives
+                  ON representatives.topic_revision_id = revisions.id
+                 AND representatives.taxonomy_run_id = revisions.taxonomy_run_id
+                WHERE revisions.taxonomy_run_id = $1
+                GROUP BY revisions.id
+                ORDER BY revisions.name COLLATE "C", revisions.id LIMIT 101
+            """, run_id)
+            clusters = await connection.fetch("""
+                SELECT c.id,c.question_id,c.member_count AS support_count,c.eligible,c.failure_reasons,
+                       p.id AS provisional_topic_id,p.name AS provisional_name,
+                       COALESCE((SELECT a.validation_errors FROM taxonomy_topic_naming_attempts a
+                         WHERE a.taxonomy_run_id=c.taxonomy_run_id AND a.cluster_candidate_id=c.id
+                         ORDER BY a.attempt_number DESC LIMIT 1),ARRAY[]::text[]) AS naming_errors
+                FROM taxonomy_cluster_candidates c LEFT JOIN taxonomy_provisional_topics p
+                  ON p.taxonomy_run_id=c.taxonomy_run_id AND p.cluster_candidate_id=c.id
+                WHERE c.taxonomy_run_id=$1 ORDER BY c.id LIMIT 101
+            """,run_id)
+            antecedents = await connection.fetch("""
+                SELECT a.topic_revision_id,a.provisional_topic_id,p.name,p.description,
+                       c.question_id,c.member_count AS support_count,a.relationship,
+                       a.reconciliation_decision_id
+                FROM taxonomy_canonical_topic_antecedents a
+                JOIN taxonomy_provisional_topics p
+                  ON p.taxonomy_run_id=a.taxonomy_run_id AND p.id=a.provisional_topic_id
+                JOIN taxonomy_cluster_candidates c
+                  ON c.taxonomy_run_id=p.taxonomy_run_id AND c.id=p.cluster_candidate_id
+                WHERE a.taxonomy_run_id=$1 AND a.topic_revision_id=ANY($2::bigint[])
+                ORDER BY a.provisional_topic_id
+            """,run_id,[row["id"] for row in rows[:100]])
+            coverage = await connection.fetchval("SELECT taxonomy_publication_facts($1)",run_id)
+            coverage = json.loads(coverage) if isinstance(coverage,str) else coverage
+            gate = await connection.fetchrow("SELECT gate_passed,failures,threshold_version FROM taxonomy_release_attestations WHERE taxonomy_run_id=$1",run_id)
     base = _summary(summary)
     return TaxonomyRunReview(
         **base.model_dump(), candidate_theme_count=base.theme_count,
@@ -133,7 +183,26 @@ async def review_taxonomy_run(run_id: int, request: Request) -> TaxonomyRunRevie
             description=row["literal_description"], support_count=row["support_count"],
             continuity_decision=row["continuity_decision"],
             representative_evidence_ids=list(row["representative_evidence_ids"]),
-        ) for row in rows],
+            antecedent_provisional_topic_ids=[a["provisional_topic_id"] for a in antecedents if a["topic_revision_id"]==row["id"]],
+            antecedents=[TaxonomyTopicAntecedent(
+                id=a["provisional_topic_id"],name=a["name"],description=a["description"],
+                question_id=a["question_id"],support_count=a["support_count"],
+                relationship=a["relationship"],reconciliation_decision_id=a["reconciliation_decision_id"],
+            ) for a in antecedents if a["topic_revision_id"]==row["id"]],
+        ) for row in rows[:100]],
+        evidence_count=coverage["evidence_count"],
+        evidence_with_topic_count=coverage["evidence_with_topic_count"],
+        evidence_without_topic_count=coverage["evidence_without_topic_count"],
+        gate_passed=gate["gate_passed"] if gate else None,
+        publication_failures=list(gate["failures"]) if gate else [],
+        threshold_version=gate["threshold_version"] if gate else None,
+        truncated=len(rows)>100 or len(clusters)>100,
+        clusters=[TaxonomyClusterReview(
+            id=c["id"],question_id=c["question_id"],support_count=c["support_count"],
+            outcome="labelled" if c["provisional_topic_id"] else "unresolved",
+            reasons=list(c["failure_reasons"]) + list(c["naming_errors"]),
+            provisional_topic_id=c["provisional_topic_id"],provisional_name=c["provisional_name"],
+        ) for c in clusters[:100]],
     )
 
 

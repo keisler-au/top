@@ -14,6 +14,10 @@ class QueueStageMetrics(BaseModel):
 
 
 class TaxonomyRunMetrics(BaseModel):
+    published_taxonomy_run_id: int | None = None
+    evidence_with_topic_count: int = 0
+    evidence_without_topic_count: int = 0
+    topic_coverage: Literal["full", "partial"] | None = None
     active: int = 0
     review_backlog: int = 0
     snapshot_evidence_count: int = 0

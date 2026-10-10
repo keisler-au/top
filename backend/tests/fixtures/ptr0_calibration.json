@@ -1,0 +1,29 @@
+{
+  "format": "ptr0-calibration-fixture/v1",
+  "records": [
+    {"id": "improve-transit-1", "question": "What should improve in the neighbourhood?", "answer": "Buses should run more often.", "concept": "bus-frequency", "position": "increase"},
+    {"id": "improve-transit-2", "question": "What should improve in the neighbourhood?", "answer": "Shorter waits between buses.", "concept": "bus-frequency", "position": "increase"},
+    {"id": "improve-transit-3", "question": "What should improve in the neighbourhood?", "answer": "A more frequent bus service.", "concept": "bus-frequency", "position": "increase"},
+    {"id": "improve-housing-1", "question": "What should improve in the neighbourhood?", "answer": "Homes need to be more affordable.", "concept": "housing-cost", "position": "lower"},
+    {"id": "improve-housing-2", "question": "What should improve in the neighbourhood?", "answer": "Lower rents for local families.", "concept": "housing-cost", "position": "lower"},
+    {"id": "improve-housing-3", "question": "What should improve in the neighbourhood?", "answer": "Cheaper places to live.", "concept": "housing-cost", "position": "lower"},
+    {"id": "pressure-housing-1", "question": "What creates the most pressure for residents?", "answer": "The rent is too high.", "concept": "housing-cost", "position": "lower"},
+    {"id": "pressure-housing-2", "question": "What creates the most pressure for residents?", "answer": "The cost of a home.", "concept": "housing-cost", "position": "lower"},
+    {"id": "pressure-housing-3", "question": "What creates the most pressure for residents?", "answer": "Unaffordable housing.", "concept": "housing-cost", "position": "lower"},
+    {"id": "pressure-transit-1", "question": "What creates the most pressure for residents?", "answer": "Long waits for the bus.", "concept": "bus-frequency", "position": "increase"},
+    {"id": "pressure-transit-2", "question": "What creates the most pressure for residents?", "answer": "Buses do not come often enough.", "concept": "bus-frequency", "position": "increase"},
+    {"id": "pressure-transit-3", "question": "What creates the most pressure for residents?", "answer": "Infrequent public transport.", "concept": "bus-frequency", "position": "increase"},
+    {"id": "homes-support-1", "question": "Should more homes be built on the old depot?", "answer": "Yes.", "concept": "depot-housing", "position": "support"},
+    {"id": "homes-support-2", "question": "Should more homes be built on the old depot?", "answer": "I support that.", "concept": "depot-housing", "position": "support"},
+    {"id": "homes-support-3", "question": "Should more homes be built on the old depot?", "answer": "Build them.", "concept": "depot-housing", "position": "support"},
+    {"id": "homes-oppose-1", "question": "Should more homes be built on the old depot?", "answer": "No.", "concept": "depot-housing", "position": "oppose"},
+    {"id": "homes-oppose-2", "question": "Should more homes be built on the old depot?", "answer": "I oppose that.", "concept": "depot-housing", "position": "oppose"},
+    {"id": "homes-oppose-3", "question": "Should more homes be built on the old depot?", "answer": "Do not build them.", "concept": "depot-housing", "position": "oppose"},
+    {"id": "parking-support-1", "question": "Should parking be removed from the town square?", "answer": "Yes.", "concept": "square-parking", "position": "support"},
+    {"id": "parking-support-2", "question": "Should parking be removed from the town square?", "answer": "I support that.", "concept": "square-parking", "position": "support"},
+    {"id": "parking-support-3", "question": "Should parking be removed from the town square?", "answer": "Remove it.", "concept": "square-parking", "position": "support"},
+    {"id": "parking-oppose-1", "question": "Should parking be removed from the town square?", "answer": "No.", "concept": "square-parking", "position": "oppose"},
+    {"id": "parking-oppose-2", "question": "Should parking be removed from the town square?", "answer": "I oppose that.", "concept": "square-parking", "position": "oppose"},
+    {"id": "parking-oppose-3", "question": "Should parking be removed from the town square?", "answer": "Keep the parking spaces.", "concept": "square-parking", "position": "oppose"}
+  ]
+}

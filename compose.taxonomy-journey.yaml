@@ -15,7 +15,7 @@ services:
       - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - ./infrastructure/postgres/migrations:/docker-entrypoint-initdb.d/migrations:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d triage_journey"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d triage_journey"]
       interval: 1s
       timeout: 5s
       retries: 30
@@ -71,6 +71,7 @@ services:
       DATABASE_URL: postgresql://postgres:journey-only@postgres:5432/triage_journey
       PUBLIC_SITE_ORIGIN: https://journey.example.test
       PUBLIC_SITE_NAME: Taxonomy journey
+      TAXONOMY_REVIEW_TOKEN: journey-review-only
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 1s
@@ -129,10 +130,10 @@ services:
       TAXONOMY_LEASE_SECONDS: "60"
       TAXONOMY_RETRY_BASE_SECONDS: "0.2"
       TAXONOMY_RETRY_MAX_SECONDS: "1"
-      TAXONOMY_AUTOMATION_POLICY_VERSION: taxonomy-automation-v2
-      TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE: "3"
-      TAXONOMY_AUTOMATION_QUIET_SECONDS: "0"
-      TAXONOMY_EMBEDDING_REPRESENTATION: mixed
+      TAXONOMY_AUTOMATION_POLICY_VERSION: taxonomy-automation-v3
+      TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE: "2"
+      TAXONOMY_AUTOMATION_QUIET_SECONDS: "3"
+      TAXONOMY_EMBEDDING_REPRESENTATION: question-answer
       TAXONOMY_EMBEDDING_DIMENSION: "768"
     healthcheck:
       test: ["CMD", "python", "-m", "triage_processor.taxonomy_scheduler", "--healthcheck"]
@@ -147,6 +148,29 @@ services:
       chat-fixture:
         condition: service_healthy
 
+  article-generation:
+    build: ./backend
+    command: ["python", "-m", "triage_processor.workers.article_generation"]
+    environment:
+      <<: *worker-environment
+      GENERATION_WORKER_POLL_INTERVAL: "0.2"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      chat-fixture:
+        condition: service_healthy
+
+  public-web:
+    build: ./frontend/public
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 1s
+      timeout: 3s
+      retries: 20
+
   journey:
     profiles: ["acceptance"]
     build: ./backend
@@ -154,6 +178,8 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:journey-only@postgres:5432/triage_journey
       JOURNEY_API_BASE_URL: http://api:8000
+      JOURNEY_EDGE_BASE_URL: http://public-web:8080
+      JOURNEY_CHAT_BASE_URL: http://chat-fixture:8080
     volumes:
       - ./backend/tests:/app/tests:ro
     depends_on:
@@ -164,6 +190,10 @@ services:
       embeddings:
         condition: service_started
       taxonomy-scheduler:
+        condition: service_healthy
+      article-generation:
+        condition: service_started
+      public-web:
         condition: service_healthy
 
 volumes:

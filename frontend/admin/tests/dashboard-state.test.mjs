@@ -37,7 +37,7 @@ test("falls back from invalid URL state and bounds page size", () => {
     "type=unknown&sort=wrong&direction=sideways&page=-1&page_size=500",
   ));
 
-  assert.equal(state.type, "theme");
+  assert.equal(state.type, "topic");
   assert.equal(state.sort, "evidence");
   assert.equal(state.direction, "desc");
   assert.equal(state.page, 1);

@@ -179,6 +179,47 @@ async def complete_job(pool: asyncpg.Pool, job: Job) -> bool:
     return completed_id is not None
 
 
+async def require_job_lease(connection: asyncpg.Connection, job: Job) -> None:
+    """Lock and verify the queue claim before an atomic result commit."""
+    owned = await connection.fetchval(
+        """
+        SELECT id
+        FROM worker_jobs
+        WHERE id = $1
+          AND job_type = $2
+          AND original_input_id = $3
+          AND status = 'processing'
+          AND locked_by = $4
+        FOR UPDATE
+        """,
+        job.id,
+        job.job_type,
+        job.original_input_id,
+        job.locked_by,
+    )
+    if owned is None:
+        raise RuntimeError("worker job lease is no longer owned")
+
+
+async def complete_job_in_transaction(
+    connection: asyncpg.Connection, job: Job
+) -> None:
+    """Complete the verified claim in the result's existing transaction."""
+    completed = await connection.fetchval(
+        """
+        UPDATE worker_jobs
+        SET status = 'completed', locked_at = NULL, locked_by = NULL,
+            completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status = 'processing' AND locked_by = $2
+        RETURNING id
+        """,
+        job.id,
+        job.locked_by,
+    )
+    if completed is None:
+        raise RuntimeError("worker job lease was lost before completion")
+
+
 async def fail_job(
     pool: asyncpg.Pool,
     job: Job,
@@ -239,7 +280,7 @@ async def run_job_loop(
     pool: asyncpg.Pool,
     *,
     job_type: JobType,
-    handler: Callable[[int], Awaitable[object]],
+    handler: Callable[[Job], Awaitable[bool | None]],
     once: bool,
     poll_interval: float,
     settings: QueueSettings,
@@ -274,7 +315,7 @@ async def run_job_loop(
         )
         error: Exception | None = None
         try:
-            await handler(job.original_input_id)
+            completed_atomically = bool(await handler(job))
         except Exception as exc:
             error = exc
         finally:
@@ -282,7 +323,7 @@ async def run_job_loop(
             with suppress(asyncio.CancelledError):
                 await heartbeat
 
-        if error is None:
+        if error is None and not completed_atomically:
             completed = await complete_job(pool, job)
             if completed:
                 LOGGER.info(
@@ -296,7 +337,7 @@ async def run_job_loop(
                     "Could not complete job %s because its lease was lost",
                     job.id,
                 )
-        else:
+        elif error is not None:
             next_status = await fail_job(pool, job, error, settings)
             LOGGER.error(
                 "%s job %s failed on attempt %s; status=%s",

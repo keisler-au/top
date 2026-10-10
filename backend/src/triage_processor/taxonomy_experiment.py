@@ -1,4 +1,4 @@
-"""Read-only tooling for the TAX-WP0 taxonomy feasibility experiment.
+"""Read-only tooling for taxonomy representation and policy calibration.
 
 The module intentionally writes only files supplied by the operator.  It does
 not create taxonomy rows, change input statuses, or enqueue worker jobs.
@@ -24,11 +24,20 @@ import asyncpg
 from triage_processor.clients.ollama import OllamaEmbeddingClient, validate_vector
 from triage_processor.clients.llm import StructuredChatClient
 from triage_processor.config import DATABASE_URL
-from triage_processor.workers.embeddings import _embed_in_batches
+from triage_processor.workers.embeddings import _embed_in_batches, build_embedding_input
 
 
 DATASET_FORMAT = "taxonomy-wp0-dataset/v1"
 REPORT_FORMAT = "taxonomy-wp0-report/v1"
+POLICY_VERSION = "partial-topic-policy/v1"
+PROMPT_INPUT_MAX_BYTES = 32_768
+MAX_PACKET_MEMBERS = 40
+CENTRAL_PACKET_MEMBERS = 30
+DIVERSE_PACKET_MEMBERS = 10
+COHESION_MINIMUM = 0.95
+SEPARATION_MINIMUM = 0.08
+MEMBERSHIP_P10_MINIMUM = 0.60
+DENSITY_PERSISTENCE_MINIMUM = 0.05
 TOPIC_LABEL_PROMPT_VERSION = "taxonomy-wp0-topic-label/1"
 THEME_PROMPT_VERSION = "taxonomy-wp0-theme-neighbourhood/1"
 
@@ -67,6 +76,7 @@ class ClusterResult:
     labels: tuple[int, ...]
     parameters: dict[str, Any]
     membership_probabilities: tuple[float, ...] = ()
+    cluster_persistence: tuple[float, ...] = ()
 
 
 CANONICAL_EVIDENCE_SQL = """
@@ -190,6 +200,41 @@ async def add_answer_only_vectors(
     ]
 
 
+async def embed_calibration_fixture(
+    path: Path,
+    embedder: OllamaEmbeddingClient,
+    *,
+    batch_size: int,
+) -> list[EvidenceUnit]:
+    payload = json.loads(path.read_text())
+    if payload.get("format") != "ptr0-calibration-fixture/v1":
+        raise ValueError("not a PTR-0 calibration fixture")
+    records = payload.get("records", [])
+    if not records:
+        raise ValueError("calibration fixture contains no records")
+    answers = [record["answer"] for record in records]
+    contextual = [
+        build_embedding_input(answer_text=record["answer"], question_text=record["question"])
+        for record in records
+    ]
+    answer_vectors = await _embed_in_batches(embedder, answers, batch_size)
+    contextual_vectors = await _embed_in_batches(embedder, contextual, batch_size)
+    return [
+        EvidenceUnit(
+            evidence_id=record["id"],
+            original_input_id=index,
+            segment_input_id=None,
+            answer_text=record["answer"],
+            question_text=record["question"],
+            created_at="2026-09-29T00:00:00+00:00",
+            vectors={"answer-only": answer_vector, "question-answer": contextual_vector},
+        )
+        for index, (record, answer_vector, contextual_vector) in enumerate(
+            zip(records, answer_vectors, contextual_vectors, strict=True), start=1
+        )
+    ]
+
+
 def write_dataset(
     path: Path,
     *,
@@ -229,7 +274,10 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     left_normalized, right_normalized = _normalized(left), _normalized(right)
     if len(left_normalized) != len(right_normalized):
         raise ValueError("embedding dimensions differ")
-    return sum(a * b for a, b in zip(left_normalized, right_normalized, strict=True))
+    # Floating point accumulation can put identical dense vectors just above
+    # one, which would reject a coherent cluster as an invalid diagnostic.
+    similarity = sum(a * b for a, b in zip(left_normalized, right_normalized, strict=True))
+    return max(-1.0, min(1.0, similarity)) if math.isfinite(similarity) else similarity
 
 
 def threshold_components(
@@ -289,6 +337,7 @@ def hdbscan_clusters(
         tuple(int(label) for label in model.labels_),
         {"min_cluster_size": min_cluster_size, "min_samples": min_samples, "metric": "euclidean"},
         tuple(float(probability) for probability in model.probabilities_),
+        tuple(float(value) for value in model.cluster_persistence_),
     )
 
 
@@ -323,6 +372,268 @@ def select_representatives(
         )
         selected.append(diverse)
     return [evidence[index].evidence_id for index in selected]
+
+
+def serialized_evidence_bytes(unit: EvidenceUnit) -> int:
+    """Return the deterministic JSON size used by the topic request budget."""
+    payload = {
+        "answer_text": unit.answer_text,
+        "evidence_id": unit.evidence_id,
+        "original_input_id": unit.original_input_id,
+        "question_text": unit.question_text,
+    }
+    return len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    )
+
+
+def serialized_packet_bytes(units: Sequence[EvidenceUnit]) -> int:
+    """Size of the compact JSON array containing the selected evidence objects."""
+    return 2 + sum(serialized_evidence_bytes(unit) for unit in units) + max(0, len(units) - 1)
+
+
+def select_bounded_packet(
+    evidence: Sequence[EvidenceUnit],
+    vectors: Sequence[Sequence[float]],
+    members: Sequence[int],
+    *,
+    maximum_bytes: int = PROMPT_INPUT_MAX_BYTES,
+) -> dict[str, Any]:
+    """Apply the selected all<=40/30-central+10-diverse packet policy.
+
+    The byte count covers the evidence objects only.  PTR-2 must account for
+    its fixed prompt envelope separately.  A <=40 cluster is never silently
+    truncated: if its complete packet does not fit, it is ineligible.
+    """
+    if maximum_bytes < 2 or not members:
+        raise ValueError("packet members must be present and maximum_bytes must fit a JSON array")
+    unique: list[int] = []
+    originals: set[int] = set()
+    for index in sorted(members, key=lambda item: evidence[item].evidence_id):
+        if evidence[index].original_input_id not in originals:
+            unique.append(index)
+            originals.add(evidence[index].original_input_id)
+    if len(unique) <= MAX_PACKET_MEMBERS:
+        ordered = unique
+        kinds = ["all"] * len(ordered)
+    else:
+        centroid = [
+            sum(vectors[index][axis] for index in unique)
+            for axis in range(len(vectors[unique[0]]))
+        ]
+        central = sorted(
+            unique,
+            key=lambda index: (
+                -cosine_similarity(vectors[index], centroid),
+                evidence[index].evidence_id,
+            ),
+        )[:CENTRAL_PACKET_MEMBERS]
+        selected = list(central)
+        remaining = [index for index in unique if index not in set(central)]
+        while remaining and len(selected) < MAX_PACKET_MEMBERS:
+            chosen = min(
+                remaining,
+                key=lambda index: (
+                    max(
+                        cosine_similarity(vectors[index], vectors[prior])
+                        for prior in selected
+                    ),
+                    evidence[index].evidence_id,
+                ),
+            )
+            selected.append(chosen)
+            remaining.remove(chosen)
+        ordered = selected
+        kinds = ["central"] * len(central) + ["diverse"] * (len(ordered) - len(central))
+    sizes = [serialized_evidence_bytes(evidence[index]) for index in ordered]
+    complete_bytes = serialized_packet_bytes([evidence[index] for index in ordered])
+    if len(unique) <= MAX_PACKET_MEMBERS and complete_bytes > maximum_bytes:
+        return {
+            "eligible": False,
+            "reason": "complete_packet_exceeds_serialized_bound",
+            "evidence_ids": [],
+            "selection_kinds": [],
+            "serialized_bytes": complete_bytes,
+            "unique_original_count": len(unique),
+        }
+    kept: list[int] = []
+    kept_kinds: list[str] = []
+    used_bytes = 2
+    for index, kind, size in zip(ordered, kinds, sizes, strict=True):
+        separator_bytes = 1 if kept else 0
+        if used_bytes + separator_bytes + size > maximum_bytes:
+            continue
+        kept.append(index)
+        kept_kinds.append(kind)
+        used_bytes += separator_bytes + size
+    eligible = (
+        len(kept) == len(unique)
+        if len(unique) <= MAX_PACKET_MEMBERS
+        else kept_kinds.count("central") == CENTRAL_PACKET_MEMBERS
+    )
+    return {
+        "eligible": eligible,
+        "reason": None if eligible else "central_packet_exceeds_serialized_bound",
+        "evidence_ids": [evidence[index].evidence_id for index in kept],
+        "selection_kinds": kept_kinds,
+        "serialized_bytes": used_bytes,
+        "unique_original_count": len(unique),
+    }
+
+
+def percentile(values: Sequence[float], fraction: float) -> float:
+    if not values or not 0 <= fraction <= 1:
+        raise ValueError("percentile requires values and a fraction from zero to one")
+    ordered = sorted(values)
+    return ordered[math.ceil(fraction * len(ordered)) - 1] if fraction else ordered[0]
+
+
+def cluster_diagnostics(
+    vectors: Sequence[Sequence[float]],
+    labels: Sequence[int],
+    membership_probabilities: Sequence[float],
+    stability_trials: Sequence[Sequence[int]],
+    cluster_persistence: Sequence[float] = (),
+) -> dict[int, dict[str, float | None]]:
+    """Calculate the four versioned geometry measures selected by PTR-0."""
+    if len(vectors) != len(labels) or len(labels) != len(membership_probabilities):
+        raise ValueError("vectors, labels, and probabilities differ in length")
+    if any(len(trial) != len(labels) for trial in stability_trials):
+        raise ValueError("stability label lists differ in length")
+    groups = {label: members for label, members in cluster_members(labels).items() if label != -1}
+    centroids = {
+        label: _normalized([
+            sum(vectors[index][axis] for index in members)
+            for axis in range(len(vectors[members[0]]))
+        ])
+        for label, members in groups.items()
+    }
+    diagnostics: dict[int, dict[str, float | None]] = {}
+    for label, members in groups.items():
+        cohesion = sum(
+            cosine_similarity(vectors[index], centroids[label]) for index in members
+        ) / len(members)
+        alternatives = [
+            cosine_similarity(centroids[label], centroid)
+            for other, centroid in centroids.items()
+            if other != label
+        ]
+        retained: list[float] = []
+        member_pairs = [(left, right) for offset, left in enumerate(members) for right in members[offset + 1 :]]
+        for trial in stability_trials:
+            retained.append(
+                1.0
+                if not member_pairs
+                else sum(trial[left] != -1 and trial[left] == trial[right] for left, right in member_pairs)
+                / len(member_pairs)
+            )
+        diagnostics[label] = {
+            "cohesion_mean_cosine": cohesion,
+            "centroid_separation": None if not alternatives else 1.0 - max(alternatives),
+            "membership_p10": percentile([membership_probabilities[index] for index in members], 0.10),
+            "stability_pair_retention": min(retained) if retained else 1.0,
+            "density_persistence": (
+                cluster_persistence[label]
+                if 0 <= label < len(cluster_persistence)
+                else None
+            ),
+        }
+    return diagnostics
+
+
+def evaluate_question_scopes(
+    evidence: Sequence[EvidenceUnit],
+    representation: str,
+    *,
+    parameter_grid: Sequence[tuple[int, int]],
+) -> dict[str, Any]:
+    """Evaluate HDBSCAN inside immutable question scopes without exposing text."""
+    if not parameter_grid:
+        raise ValueError("parameter grid cannot be empty")
+    grouped: dict[str, list[EvidenceUnit]] = defaultdict(list)
+    for unit in evidence:
+        if not unit.question_text:
+            raise ValueError("question-scoped evaluation requires question context")
+        grouped[unit.question_text].append(unit)
+    scopes: list[dict[str, Any]] = []
+    for question, units in sorted(grouped.items()):
+        vectors = [unit.vectors[representation] for unit in units]
+        trials = [
+            hdbscan_clusters(vectors, min_cluster_size=size, min_samples=samples)
+            for size, samples in parameter_grid
+        ]
+        configurations = []
+        for result in trials:
+            probabilities = result.membership_probabilities or tuple(
+                0.0 if label == -1 else 1.0 for label in result.labels
+            )
+            diagnostics = cluster_diagnostics(
+                vectors,
+                result.labels,
+                probabilities,
+                [trial.labels for trial in trials],
+                result.cluster_persistence,
+            )
+            configurations.append(
+                {
+                    "parameters": result.parameters,
+                    "cluster_count": len(diagnostics),
+                    "noise_count": sum(label == -1 for label in result.labels),
+                    "diagnostics": diagnostics,
+                }
+            )
+        scopes.append(
+            {
+                "question_sha256": sha256(question.encode()).hexdigest(),
+                "evidence_count": len(units),
+                "configurations": configurations,
+            }
+        )
+    return {
+        "policy_version": POLICY_VERSION,
+        "representation": representation,
+        "parameter_grid": [
+            {"min_cluster_size": size, "min_samples": samples}
+            for size, samples in parameter_grid
+        ],
+        "scopes": scopes,
+    }
+
+
+def topic_relationship(
+    left_concept: str,
+    left_position: str,
+    left_domain: str,
+    right_concept: str,
+    right_position: str,
+    right_domain: str,
+) -> str:
+    """Executable fixture rubric for equivalent, related, and distinct topics."""
+    if not all(value.strip() for value in (left_concept, left_position, left_domain, right_concept, right_position, right_domain)):
+        raise ValueError("topic rubric values cannot be blank")
+    if left_concept == right_concept:
+        return "equivalent"
+    if left_domain == right_domain:
+        return "related-not-equivalent"
+    return "distinct"
+
+
+def cluster_passes_policy(diagnostics: dict[str, float | None]) -> tuple[bool, tuple[str, ...]]:
+    """Apply the calibrated v1 cluster gate and return stable reason codes."""
+    failures = []
+    checks = (
+        ("cohesion_below_minimum", "cohesion_mean_cosine", COHESION_MINIMUM, True),
+        ("separation_below_minimum", "centroid_separation", SEPARATION_MINIMUM, False),
+        ("membership_below_minimum", "membership_p10", MEMBERSHIP_P10_MINIMUM, True),
+        ("stability_below_minimum", "density_persistence", DENSITY_PERSISTENCE_MINIMUM, True),
+    )
+    for reason, key, minimum, required in checks:
+        value = diagnostics.get(key)
+        if (required and value is None) or (
+            value is not None and (not math.isfinite(value) or not 0 <= value <= 1 or value < minimum)
+        ):
+            failures.append(reason)
+    return not failures, tuple(failures)
 
 
 def evidence_payload(evidence: Sequence[EvidenceUnit], evidence_ids: Sequence[str]) -> list[dict[str, object]]:
@@ -507,6 +818,27 @@ async def _evaluate_command(args: argparse.Namespace) -> None:
     Path(args.output).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 
 
+async def _fixture_command(args: argparse.Namespace) -> None:
+    client = OllamaEmbeddingClient(
+        base_url=args.ollama_base_url,
+        model=args.embedding_model,
+        timeout_seconds=args.timeout_seconds,
+    )
+    try:
+        evidence = await embed_calibration_fixture(
+            Path(args.fixture), client, batch_size=args.batch_size
+        )
+    finally:
+        await client.close()
+    write_dataset(
+        Path(args.output),
+        cutoff=canonical_cutoff("2026-09-29T00:00:00+00:00"),
+        embedding_model=args.embedding_model,
+        source_representation="calibration-answer-only-and-question-answer",
+        evidence=evidence,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the read-only TAX-WP0 feasibility experiment.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -519,6 +851,13 @@ def main() -> None:
     export.add_argument("--ollama-base-url", default=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
     export.add_argument("--timeout-seconds", type=float, default=120)
     export.add_argument("--batch-size", type=int, default=16)
+    fixture = commands.add_parser("fixture", help="Embed the privacy-safe PTR-0 fixture.")
+    fixture.add_argument("--fixture", required=True)
+    fixture.add_argument("--output", required=True)
+    fixture.add_argument("--embedding-model", default=os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text"))
+    fixture.add_argument("--ollama-base-url", default=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
+    fixture.add_argument("--timeout-seconds", type=float, default=120)
+    fixture.add_argument("--batch-size", type=int, default=16)
     evaluate = commands.add_parser("evaluate", help="Cluster an exported dataset and write an evaluation report.")
     evaluate.add_argument("--dataset", required=True)
     evaluate.add_argument("--output", required=True)
@@ -534,6 +873,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "export":
         asyncio.run(_export_command(args))
+    elif args.command == "fixture":
+        asyncio.run(_fixture_command(args))
     else:
         asyncio.run(_evaluate_command(args))
 

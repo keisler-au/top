@@ -1,6 +1,5 @@
 export type TaxonomyType = "theme" | "topic";
 export type TaxonomyAvailability = "available" | "taxonomy_unavailable" | "ambiguous";
-export type InputTaxonomyState = "classified" | "pending_classification" | "taxonomy_unavailable";
 export type CoverageState = "no_evidence" | "uncovered" | "covered";
 export type EvidenceType = "original" | "segment";
 export type RecommendationStrategy = "most-evidence" | "least-covered";
@@ -20,6 +19,10 @@ export type SortDirection = "asc" | "desc";
 
 export interface DashboardSummary {
   evidence_count: number;
+  evidence_with_topic_count: number;
+  evidence_without_topic_count: number;
+  topic_coverage: "full" | "partial";
+  published_taxonomy_run_id: number | null;
   theme_count: number;
   topic_count: number;
   article_count: number;
@@ -39,8 +42,22 @@ export interface TaxonomyItem {
   generation_eligible: boolean;
 }
 
+export interface InputFilters {
+  source?: string;
+  form_key?: string;
+  question_key?: string;
+  question_version?: number;
+  submission_key?: string;
+  search?: string;
+  status?: "new" | "ineligible" | "ready_for_embedding" | "ready_for_analysis" | "completed";
+  topic?: string;
+  theme?: string;
+  has_topic?: boolean;
+  created_from?: string;
+  created_to?: string;
+}
+
 export interface InputTaxonomyCoverage {
-  taxonomy_state: InputTaxonomyState;
   published_taxonomy_run_id: number | null;
 }
 
@@ -56,18 +73,14 @@ export interface InputTheme {
   description: string | null;
 }
 
-/**
- * Input classification is a projection of exactly one published run.  An
- * uncovered input is pending, while an installation with no published run is
- * explicitly unavailable.  There are intentionally no legacy `topic` fields.
- */
+/** Empty associations are normal; processing status is independent of topic coverage. */
 export interface Input extends InputTaxonomyCoverage {
   id: number;
   original_text: string;
   source: string;
   status: string;
-  question_id: number | null;
-  question_context: EvidenceQuestionContext | null;
+  question_id: number;
+  question_context: EvidenceQuestionContext;
   submission_key: string | null;
   source_record_key: string | null;
   created_at: string;
@@ -325,4 +338,59 @@ export interface ArticlePreview {
 export interface ArticleTransition {
   note?: string | null;
   actor?: string | null;
+}
+
+export interface TaxonomyRunListItem { id: number; status: string }
+export interface TaxonomyTopicAntecedent {
+  id: number;
+  name: string;
+  description: string;
+  question_id: number | null;
+  support_count: number;
+  relationship: string;
+  reconciliation_decision_id: number;
+}
+export interface TaxonomyRunTopicReview {
+  id: number;
+  topic_id: number;
+  name: string;
+  description: string;
+  support_count: number;
+  continuity_decision: string;
+  representative_evidence_ids: number[];
+  antecedent_provisional_topic_ids: number[];
+  antecedents: TaxonomyTopicAntecedent[];
+}
+export interface TaxonomyClusterReview {
+  id: number;
+  question_id: number | null;
+  support_count: number;
+  outcome: string;
+  reasons: string[];
+  provisional_topic_id: number | null;
+  provisional_name: string | null;
+}
+export interface TaxonomyRunReview extends TaxonomyRunListItem {
+  source_cutoff: string;
+  updated_at: string;
+  topic_count: number;
+  noise_count: number;
+  theme_count: number;
+  validation_failure_count: number;
+  changed_membership_count: number;
+  candidate_theme_count: number;
+  evidence_count: number;
+  evidence_with_topic_count: number;
+  evidence_without_topic_count: number;
+  gate_passed: boolean | null;
+  publication_failures: string[];
+  threshold_version: string | null;
+  topics: TaxonomyRunTopicReview[];
+  clusters: TaxonomyClusterReview[];
+  truncated: boolean;
+}
+export interface TaxonomyTopicEvidence {
+  items: { id: number; original_input_id: number; segment_input_id: number | null; text: string }[];
+  offset: number;
+  page_size: number;
 }

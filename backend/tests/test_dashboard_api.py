@@ -58,6 +58,10 @@ class StubDashboardConnection:
         if "dashboard:summary" in query:
             return {
                 "evidence_count": 14,
+                "evidence_with_topic_count": 12,
+                "evidence_without_topic_count": 2,
+                "topic_coverage": "partial",
+                "published_taxonomy_run_id": 44,
                 "theme_count": 3,
                 "topic_count": 5,
                 "article_count": 0,
@@ -158,6 +162,10 @@ class DashboardApiTests(unittest.IsolatedAsyncioTestCase):
             response.json(),
             {
                 "evidence_count": 14,
+                "evidence_with_topic_count": 12,
+                "evidence_without_topic_count": 2,
+                "topic_coverage": "partial",
+                "published_taxonomy_run_id": 44,
                 "theme_count": 3,
                 "topic_count": 5,
                 "article_count": 0,

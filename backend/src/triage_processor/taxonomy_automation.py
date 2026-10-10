@@ -23,8 +23,9 @@ from triage_processor.taxonomy_snapshots import (
     _validation_counts,
 )
 
-MIN_CLUSTER_SIZE = 3
-MIN_SAMPLES = 2
+CLUSTER_POLICY_VERSION = "partial-topic-policy/v1"
+MIN_CLUSTER_SIZE = 2
+MIN_SAMPLES = 1
 
 
 @dataclass(frozen=True)
@@ -33,32 +34,32 @@ class AutomationPolicy:
     poll_interval: float = 10
     minimum_evidence: int = MIN_CLUSTER_SIZE
     quiet_seconds: float = 30
-    version: str = "taxonomy-automation-v2"
+    version: str = "taxonomy-automation-v3"
     embedding_model: str = "nomic-embed-text"
-    embedding_representation: str = "mixed"
+    embedding_representation: str = "question-answer"
     embedding_dimension: int = 768
     clustering_model: str = "hdbscan-0.8.44"
     topic_model: str = "qwen3:4b-instruct"
     theme_model: str = "qwen3:4b-instruct"
-    topic_prompt_version: str = "taxonomy-topic-v1"
-    theme_prompt_version: str = "taxonomy-theme-v1"
+    topic_prompt_version: str = "partial-topic-naming/v1"
+    theme_prompt_version: str = "partial-theme-inference/v1"
 
     @classmethod
     def from_env(cls) -> "AutomationPolicy":
         policy = cls(
             enabled=os.getenv("TAXONOMY_AUTOMATION_ENABLED", "true").strip().lower() == "true",
             poll_interval=float(os.getenv("TAXONOMY_POLL_INTERVAL", "10")),
-            minimum_evidence=int(os.getenv("TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE", "3")),
+            minimum_evidence=int(os.getenv("TAXONOMY_AUTOMATION_MINIMUM_EVIDENCE", "2")),
             quiet_seconds=float(os.getenv("TAXONOMY_AUTOMATION_QUIET_SECONDS", "30")),
-            version=os.getenv("TAXONOMY_AUTOMATION_POLICY_VERSION", "taxonomy-automation-v2").strip(),
+            version=os.getenv("TAXONOMY_AUTOMATION_POLICY_VERSION", "taxonomy-automation-v3").strip(),
             embedding_model=os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text").strip(),
-            embedding_representation=os.getenv("TAXONOMY_EMBEDDING_REPRESENTATION", "mixed").strip(),
+            embedding_representation=os.getenv("TAXONOMY_EMBEDDING_REPRESENTATION", "question-answer").strip(),
             embedding_dimension=int(os.getenv("TAXONOMY_EMBEDDING_DIMENSION", "768")),
             clustering_model=os.getenv("TAXONOMY_CLUSTERING_MODEL", "hdbscan-0.8.44").strip(),
             topic_model=os.getenv("TAXONOMY_TOPIC_MODEL", os.getenv("LLM_MODEL", "qwen3:4b-instruct")).strip(),
             theme_model=os.getenv("TAXONOMY_THEME_MODEL", os.getenv("LLM_MODEL", "qwen3:4b-instruct")).strip(),
-            topic_prompt_version=os.getenv("TAXONOMY_TOPIC_PROMPT_VERSION", "taxonomy-topic-v1").strip(),
-            theme_prompt_version=os.getenv("TAXONOMY_THEME_PROMPT_VERSION", "taxonomy-theme-v1").strip(),
+            topic_prompt_version=os.getenv("TAXONOMY_TOPIC_PROMPT_VERSION", "partial-topic-naming/v1").strip(),
+            theme_prompt_version=os.getenv("TAXONOMY_THEME_PROMPT_VERSION", "partial-theme-inference/v1").strip(),
         )
         policy.validate()
         return policy
@@ -84,6 +85,7 @@ class AutomationPolicy:
             configuration={
                 "version": self.version,
                 "clustering": {"algorithm": self.clustering_model, "min_cluster_size": MIN_CLUSTER_SIZE, "min_samples": MIN_SAMPLES},
+                "cluster_policy_version": CLUSTER_POLICY_VERSION,
                 "automation_policy_version": self.version,
             },
             embedding_model=self.embedding_model,

@@ -479,6 +479,11 @@ EXECUTE FUNCTION enqueue_original_input_job();
 \ir migrations/041_repair_taxonomy_stage_recovery.sql
 \ir migrations/042_taxonomy_automation_replay.sql
 \ir migrations/043_stabilize_operations_rate_limit_window.sql
+\ir migrations/044_partial_topic_cluster_inputs.sql
+\ir migrations/045_add_provisional_topics.sql
+\ir migrations/046_add_topic_reconciliation.sql
+\ir migrations/047_partial_taxonomy_attestation.sql
+\ir migrations/048_partial_taxonomy_publication.sql
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
     filename TEXT PRIMARY KEY,
@@ -529,4 +534,9 @@ VALUES
     ,('041_repair_taxonomy_stage_recovery.sql')
     ,('042_taxonomy_automation_replay.sql')
     ,('043_stabilize_operations_rate_limit_window.sql')
+    ,('044_partial_topic_cluster_inputs.sql')
+    ,('045_add_provisional_topics.sql')
+    ,('046_add_topic_reconciliation.sql')
+    ,('047_partial_taxonomy_attestation.sql')
+    ,('048_partial_taxonomy_publication.sql')
 ON CONFLICT DO NOTHING;

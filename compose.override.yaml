@@ -1,0 +1,91 @@
+# Automatically merged for local development: docker compose up.
+# Production images/profiles: docker compose -f compose.yaml up -d --build.
+# Requires Docker Compose >= 2.24.4 for !reset.
+x-python-dev: &python-dev
+  image: triage-processor-backend-dev:local
+  init: true
+  stop_grace_period: 2m10s
+  volumes:
+    - ./backend/src:/app/src:ro
+
+services:
+  api:
+    <<: *python-dev
+    command: ["uvicorn", "triage_processor.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/src"]
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+
+  google-sheets:
+    <<: *python-dev
+    profiles: !reset []
+    command:
+      - sh
+      - -c
+      - >-
+        test -f /run/secrets/google-sheets.json && test -r /run/secrets/google-sheets.json ||
+        { echo 'Google Sheets requires a readable service-account JSON file.' >&2; exit 1; };
+        exec python -m watchfiles --filter python --sigint-timeout 120 --sigkill-timeout 5
+        'python -m triage_processor.integrations.google_sheets' /app/src
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+    volumes:
+      - ./backend/src:/app/src:ro
+      - type: bind
+        source: ${GOOGLE_SHEETS_CREDENTIALS_FILE:-./.secrets/google-sheets.json}
+        target: /run/secrets/google-sheets.json
+        read_only: true
+        bind:
+          create_host_path: false
+
+  eligibility-segmentation:
+    <<: *python-dev
+    command: ["python", "-m", "watchfiles", "--filter", "python", "--sigint-timeout", "120", "--sigkill-timeout", "5", "python -m triage_processor.workers.eligibility_segmentation", "/app/src"]
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+
+  embeddings:
+    <<: *python-dev
+    command: ["python", "-m", "watchfiles", "--filter", "python", "--sigint-timeout", "120", "--sigkill-timeout", "5", "python -m triage_processor.workers.embeddings", "/app/src"]
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+
+  taxonomy-scheduler:
+    <<: *python-dev
+    command: ["python", "-m", "watchfiles", "--filter", "python", "--sigint-timeout", "120", "--sigkill-timeout", "5", "python -m triage_processor.taxonomy_scheduler", "/app/src"]
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+
+  article-generation:
+    <<: *python-dev
+    command: ["python", "-m", "watchfiles", "--filter", "python", "--sigint-timeout", "120", "--sigkill-timeout", "5", "python -m triage_processor.workers.article_generation", "/app/src"]
+    environment:
+      WATCHFILES_FORCE_POLLING: "true"
+
+  admin-web:
+    image: triage-processor-admin-dev:local
+    profiles: !reset []
+    build:
+      target: development
+    init: true
+    command: ["npm", "run", "dev"]
+    environment:
+      FRONTEND_PORT: "8080"
+      API_BASE_URL: http://api:8000
+    volumes:
+      - ./frontend/admin/src:/app/src:ro
+      - ./frontend/admin/scripts:/app/scripts:ro
+      - ./frontend/admin/index.html:/app/index.html:ro
+      - ./frontend/admin/tsconfig.json:/app/tsconfig.json:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  public-web:
+    volumes:
+      - ./frontend/public/assets:/usr/share/nginx/html/assets:ro
+      - ./frontend/public/favicon.svg:/usr/share/nginx/html/favicon.svg:ro
+      - ./frontend/public/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend/public/nginx/security-headers.inc:/etc/nginx/security-headers.inc:ro

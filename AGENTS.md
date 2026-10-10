@@ -14,6 +14,40 @@ Inspect `git status --short` and the relevant code and tests before changing
 anything. Preserve existing work. Record the starting revision and relevant
 uncommitted changes; HEAD alone does not describe a dirty working tree.
 
+## Explanation requests (`EXPLAIN:`)
+
+When a user prompt starts with `EXPLAIN:`, write for a reader who has no prior
+knowledge of the project. Start with a one- or two-sentence plain-language
+summary. Then describe each point using these four headings, in this order:
+
+1. **Issue:** What happens now.
+2. **Why it is an issue:** The concrete problem or risk this creates.
+3. **Target state:** What should happen instead.
+4. **Why this is the target:** The benefit or reason for choosing that result.
+
+Keep the explanation concise and follow these rules:
+
+- Prefer everyday words. Do not assume the reader understands project, database,
+  or delivery terminology.
+- Explain every necessary technical term or label when it first appears. For
+  example, describe `PTR-1` as a named piece of planned work before using the
+  label. Avoid the label entirely when it does not help the explanation.
+- Do not use shorthand such as "frozen segment", "transaction boundary",
+  "lease", "stale worker", "provenance", "canonical", or "invariant" without
+  immediately saying what it means in this situation.
+- Use one term consistently for each concept. Do not switch between terms such
+  as input, answer, record, evidence, and segment unless their differences have
+  been explained and matter to the answer.
+- Explain behaviour and outcomes before implementation details. Mention package
+  IDs, file paths, functions, database rules, or tests only when they help the
+  reader locate work or understand why the behaviour occurs.
+- Use short sentences and compact paragraphs or bullets. Give an example only
+  when it makes the explanation clearer.
+- Clearly distinguish what the system does now from what is proposed or still
+  needs to be built. Do not present a planned change as existing behaviour.
+- Translate source wording into plain language instead of repeating technical
+  wording and adding a glossary afterward.
+
 ## Required behaviour
 
 - Apply architecture contracts by their `AC-*` IDs. Existing inconsistencies

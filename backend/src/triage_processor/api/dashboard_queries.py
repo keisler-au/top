@@ -123,7 +123,13 @@ DASHBOARD_SUMMARY_QUERY = f"""
 -- dashboard:summary
 WITH RECURSIVE {CANONICAL_EVIDENCE_CTE}, {CANONICAL_THEME_CTES}
 SELECT
-    (SELECT count(*) FROM canonical_evidence)::bigint AS evidence_count,
+    (SELECT count(*) FROM taxonomy_run_evidence WHERE taxonomy_run_id=(SELECT id FROM published_taxonomy_run))::bigint AS evidence_count,
+    (SELECT count(DISTINCT evidence_id) FROM canonical_evidence)::bigint AS evidence_with_topic_count,
+    (SELECT count(*) FROM taxonomy_run_evidence e WHERE e.taxonomy_run_id=(SELECT id FROM published_taxonomy_run)
+        AND NOT EXISTS (SELECT 1 FROM topic_memberships m WHERE m.taxonomy_run_id=e.taxonomy_run_id AND m.evidence_id=e.id))::bigint AS evidence_without_topic_count,
+    CASE WHEN EXISTS (SELECT 1 FROM taxonomy_run_evidence e WHERE e.taxonomy_run_id=(SELECT id FROM published_taxonomy_run)
+        AND NOT EXISTS (SELECT 1 FROM topic_memberships m WHERE m.taxonomy_run_id=e.taxonomy_run_id AND m.evidence_id=e.id)) THEN 'partial' ELSE 'full' END AS topic_coverage,
+    (SELECT id FROM published_taxonomy_run) AS published_taxonomy_run_id,
     (
         SELECT count(*) FROM canonical_themes
     )::bigint AS theme_count,

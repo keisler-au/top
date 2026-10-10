@@ -297,6 +297,7 @@ export class GenerationPage extends HTMLElement {
 
   async #loadTargets(search = ""): Promise<void> {
     this.#startRequest();
+    const controller = this.#controller;
     this.#targetSearch = search;
     try {
       if (this.#state.strategy === "specific") {
@@ -307,20 +308,22 @@ export class GenerationPage extends HTMLElement {
           direction: "desc",
           page: 1,
           pageSize: 100,
-        }, { signal: this.#controller?.signal });
+        }, { signal: controller?.signal });
+        if (controller !== this.#controller || controller?.signal.aborted) return;
         this.#targets = response.items.filter((item) => item.generation_eligible);
       } else {
         const response = await api.recommendations(
           this.#state.type,
           this.#state.strategy,
           20,
-          { signal: this.#controller?.signal },
+          { signal: controller?.signal },
         );
+        if (controller !== this.#controller || controller?.signal.aborted) return;
         this.#targets = response.items;
       }
       this.#finishRequest();
     } catch (error) {
-      if (!this.#controller?.signal.aborted) this.#failRequest(error);
+      if (controller === this.#controller && !controller?.signal.aborted) this.#failRequest(error);
     }
   }
 
@@ -399,12 +402,14 @@ export class GenerationPage extends HTMLElement {
     const key = this.#state.key;
     if (key === null) return;
     this.#startRequest();
+    const controller = this.#controller;
     try {
       const target = await api.taxonomyDetail(
         this.#state.type,
         key,
-        { signal: this.#controller?.signal },
+        { signal: controller?.signal },
       );
+      if (controller !== this.#controller || controller?.signal.aborted) return;
       if (!target.generation_eligible) {
         this.#state.key = null;
         this.#state.step = "target";
@@ -418,7 +423,7 @@ export class GenerationPage extends HTMLElement {
       this.#target = target;
       await this.#loadEvidence(false);
     } catch (error) {
-      if (!this.#controller?.signal.aborted) {
+      if (controller === this.#controller && !controller?.signal.aborted) {
         const message = userFacingError(error);
         this.#state.key = null;
         this.#state.step = "target";
@@ -434,20 +439,22 @@ export class GenerationPage extends HTMLElement {
   async #loadEvidence(startRequest = true): Promise<void> {
     if (!this.#target) return;
     if (startRequest) this.#startRequest();
+    const controller = this.#controller;
     try {
       const response = await api.evidence(
         this.#target.type,
         this.#target.key,
         1,
         100,
-        { signal: this.#controller?.signal },
+        { signal: controller?.signal },
       );
+      if (controller !== this.#controller || controller?.signal.aborted) return;
       this.#evidence = response.items;
       this.#evidenceTotal = response.total;
       this.#selectedEvidence = new Set(response.items.map((item) => item.id));
       this.#finishRequest();
     } catch (error) {
-      if (!this.#controller?.signal.aborted) this.#failRequest(error);
+      if (controller === this.#controller && !controller?.signal.aborted) this.#failRequest(error);
     }
   }
 
@@ -526,8 +533,11 @@ export class GenerationPage extends HTMLElement {
 
   async #loadTemplates(): Promise<void> {
     this.#startRequest();
+    const controller = this.#controller;
     try {
-      this.#templates = await api.articleTemplates({ signal: this.#controller?.signal });
+      const templates = await api.articleTemplates({ signal: controller?.signal });
+      if (controller !== this.#controller || controller?.signal.aborted) return;
+      this.#templates = templates;
       const firstActive = this.#templates.find((template) => template.status === "active");
       if (this.#selectedTemplateId === null && firstActive) {
         this.#selectTemplate(firstActive, false);
@@ -537,7 +547,7 @@ export class GenerationPage extends HTMLElement {
         await this.#loadPreview();
       }
     } catch (error) {
-      if (!this.#controller?.signal.aborted) this.#failRequest(error);
+      if (controller === this.#controller && !controller?.signal.aborted) this.#failRequest(error);
     }
   }
 
@@ -1107,6 +1117,7 @@ export class GenerationPage extends HTMLElement {
   async #submitJob(): Promise<void> {
     if (!this.#target || this.#selectedVersionId === null) return;
     this.#startRequest();
+    const controller = this.#controller;
     try {
       const job = await api.createGenerationJob({
         strategy: this.#state.strategy,
@@ -1115,7 +1126,8 @@ export class GenerationPage extends HTMLElement {
         template_version_id: this.#selectedVersionId,
         editorial_guidance: this.#guidance || null,
         evidence_ids: [...this.#selectedEvidence],
-      }, { signal: this.#controller?.signal });
+      }, { signal: controller?.signal });
+      if (controller !== this.#controller || controller?.signal.aborted) return;
       this.#job = job;
       this.#state.jobId = job.id;
       this.#state.step = "progress";
@@ -1125,7 +1137,7 @@ export class GenerationPage extends HTMLElement {
       this.#announce(`Article creation queued as job ${job.id}.`);
       this.#schedulePoll();
     } catch (error) {
-      if (!this.#controller?.signal.aborted) this.#failRequest(error);
+      if (controller === this.#controller && !controller?.signal.aborted) this.#failRequest(error);
     }
   }
 
@@ -1143,6 +1155,7 @@ export class GenerationPage extends HTMLElement {
     try {
       const previousStatus = this.#job?.status;
       const job = await api.generationJob(jobId, { signal: controller.signal });
+      if (controller !== this.#controller || controller.signal.aborted) return;
       this.#job = job;
       this.#state.strategy = job.strategy;
       this.#state.type = job.taxonomy_type;

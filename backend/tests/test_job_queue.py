@@ -104,8 +104,8 @@ class JobQueueTests(unittest.IsolatedAsyncioTestCase):
         )
         handled = []
 
-        async def handler(input_id):
-            handled.append(input_id)
+        async def handler(job):
+            handled.append(job.original_input_id)
 
         await run_job_loop(
             FakePool(connection),

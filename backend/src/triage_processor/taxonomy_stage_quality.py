@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from hashlib import sha256
 import json
 
@@ -21,8 +21,15 @@ class QualityFacts:
     candidate_theme_count: int
     reconciled_theme_count: int
     duplicate_topic_count: int = 0
+    canonical_topic_count: int = 0
+    evidence_with_topic_count: int = 0
+    evidence_without_topic_count: int = 0
+    question_count: int = 0
+    submission_count: int = 0
+    rejected_topic_count: int = 0
+    integrity_failures: tuple[str, ...] = ()
 
-    def signals(self) -> dict[str, int | float]:
+    def signals(self) -> dict[str, object]:
         return {
             **asdict(self),
             "noise_rate": self.noise_count / self.evidence_count if self.evidence_count else 0.0,
@@ -41,32 +48,29 @@ class QualityFacts:
         }
 
 
-THRESHOLD_VERSION = "taxonomy-release-gate-v2"
-THRESHOLDS = {
-    "minimum_snapshot_completeness": 1.0,
-    "maximum_noise_rate": 0.4,
-    "minimum_topic_acceptance_rate": 0.8,
-    "maximum_duplicate_topic_rate": 0.1,
-    "minimum_reconciled_theme_count": 1,
-}
+THRESHOLD_VERSION = "taxonomy-release-gate-v3"
+THRESHOLDS = {"minimum_canonical_topic_count": 1, "require_internal_consistency": True}
 
 
-def evaluate_computed_gate(metrics: dict[str, int | float]) -> tuple[bool, tuple[str, ...]]:
-    failures: list[str] = []
-    if metrics["snapshot_completeness"] < THRESHOLDS["minimum_snapshot_completeness"]:
-        failures.append("snapshot_incomplete")
-    if metrics["noise_rate"] > THRESHOLDS["maximum_noise_rate"]:
-        failures.append("noise_rate_exceeded")
-    if metrics["topic_acceptance_rate"] < THRESHOLDS["minimum_topic_acceptance_rate"]:
-        failures.append("topic_acceptance_rate_low")
-    if metrics["duplicate_topic_rate"] > THRESHOLDS["maximum_duplicate_topic_rate"]:
-        failures.append("duplicate_topic_rate_exceeded")
-    if metrics["reconciled_theme_count"] < THRESHOLDS["minimum_reconciled_theme_count"]:
-        failures.append("reconciled_themes_missing")
+def evaluate_computed_gate(metrics: dict) -> tuple[bool, tuple[str, ...]]:
+    failures = list(metrics.get("integrity_failures", ()))
+    counts = [metrics.get(key) for key in (
+        "evidence_count", "canonical_topic_count", "evidence_with_topic_count",
+        "evidence_without_topic_count",
+    )]
+    if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in counts):
+        failures.append("coverage_inconsistent")
+    if metrics.get("evidence_count", 0) == 0:
+        failures.append("snapshot_empty")
+    if isinstance(metrics.get("canonical_topic_count"), int) and metrics["canonical_topic_count"] < 1:
+        failures.append("canonical_topics_missing")
+    if all(isinstance(value, int) for value in counts) and counts[0] != counts[2] + counts[3]:
+        failures.append("coverage_inconsistent")
+    failures = list(dict.fromkeys(failures))
     return not failures, tuple(failures)
 
 
-def attestation_input_sha256(metrics: dict[str, int | float]) -> str:
+def attestation_input_sha256(metrics: dict) -> str:
     """Hash every machine-evaluated gate input, including its policy version."""
     gate_input = {
         "metrics": metrics,
@@ -83,20 +87,21 @@ async def compute_run_quality(
     async with pool.acquire() as connection:
         async with connection.transaction():
             if stage is not None:
+                if stage.run_id != run_id or stage.stage != "quality":
+                    raise ValueError("claimed stage does not match quality run")
                 await require_stage_lease(connection, stage)
-            row = await connection.fetchrow(
-                """
-                SELECT
-                    (SELECT count(*) FROM taxonomy_run_evidence WHERE taxonomy_run_id = $1)::int AS evidence_count,
-                    (SELECT count(*) FROM taxonomy_cluster_memberships WHERE taxonomy_run_id = $1 AND decision = 'clustered')::int AS clustered_count,
-                    (SELECT count(*) FROM taxonomy_cluster_memberships WHERE taxonomy_run_id = $1 AND decision = 'noise')::int AS noise_count,
-                    (SELECT count(*) FROM taxonomy_topic_naming_attempts WHERE taxonomy_run_id = $1)::int AS naming_attempt_count,
-                    (SELECT count(*) FROM taxonomy_topic_naming_attempts WHERE taxonomy_run_id = $1 AND accepted)::int AS accepted_topic_count,
-                    (SELECT count(*) FROM taxonomy_topic_naming_attempts WHERE taxonomy_run_id = $1 AND (validation_errors @> ARRAY['duplicate_topic'] OR validation_errors @> ARRAY['normalized name duplicates another candidate topic in this run']))::int AS duplicate_topic_count,
-                    (SELECT count(*) FROM taxonomy_candidate_themes WHERE taxonomy_run_id = $1)::int AS candidate_theme_count,
-                    (SELECT count(*) FROM taxonomy_reconciled_themes WHERE taxonomy_run_id = $1)::int AS reconciled_theme_count
-                """, run_id,
+            existing = await connection.fetchval(
+                "SELECT metrics FROM taxonomy_release_attestations WHERE taxonomy_run_id=$1", run_id
             )
+            if existing is not None:
+                metrics = json.loads(existing) if isinstance(existing, str) else dict(existing)
+                stored = {field.name: metrics[field.name] for field in fields(QualityFacts)
+                          if field.name in metrics}
+                stored["integrity_failures"] = tuple(stored.get("integrity_failures", ()))
+                return QualityFacts(**stored)
+            raw = await connection.fetchval("SELECT taxonomy_publication_facts($1)", run_id)
+            row = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            row["integrity_failures"] = tuple(row["integrity_failures"])
             facts = QualityFacts(**dict(row))
             metrics = facts.signals()
             gate_passed, failures = evaluate_computed_gate(metrics)

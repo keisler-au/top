@@ -94,14 +94,32 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
     async def seed(self):
         # Repeated text remains distinct evidence. Split originals never count twice.
         await self.admin.execute("""
-            INSERT INTO original_inputs (original_text, source, status, created_at) VALUES
-            ('Repeated answer', 'test', 'completed', '2026-01-01'),
-            ('Repeated answer', 'test', 'completed', '2026-01-01'),
-            ('Split answer', 'test', 'completed', '2026-01-01'),
-            ('Not yet complete', 'test', 'new', '2026-01-01');
-            INSERT INTO segment_inputs (original_input_id, segment_order, segment_text) VALUES
-            (3, 0, 'First cost point'), (3, 1, 'Second cost point'),
-            (3, 2, 'Delivery point'), (4, 0, 'Pending parent');
+            INSERT INTO questions(source, form_key, question_key, question_version, question_text)
+            VALUES('test', 'dashboard-fixture', 'primary', 1, 'What should improve?');
+            INSERT INTO original_inputs (original_text, source, status, question_id, created_at) VALUES
+            ('Repeated answer', 'test', 'completed', 1, '2026-01-01'),
+            ('Repeated answer', 'test', 'completed', 1, '2026-01-01'),
+            ('Split answer', 'test', 'completed', 1, '2026-01-01'),
+            ('Not yet complete', 'test', 'new', 1, '2026-01-01');
+            INSERT INTO input_preparation_decisions(
+                original_input_id, eligible, segments, model, prompt_version, decision_source
+            ) VALUES
+            (3, TRUE, '["First cost point", "Second cost point", "Delivery point"]'::jsonb,
+             'fixture', 'fixture-v1', 'model'),
+            (4, TRUE, '["Pending parent"]'::jsonb, 'fixture', 'fixture-v1', 'model');
+            INSERT INTO segment_inputs(
+                original_input_id, segment_order, segment_text, preparation_decision_id
+            )
+            SELECT fixture.original_input_id, fixture.segment_order, fixture.segment_text, decisions.id
+            FROM (VALUES
+                (3::bigint, 0, 'First cost point'),
+                (3::bigint, 1, 'Second cost point'),
+                (3::bigint, 2, 'Delivery point'),
+                (4::bigint, 0, 'Pending parent')
+            ) AS fixture(original_input_id, segment_order, segment_text)
+            JOIN input_preparation_decisions AS decisions
+              ON decisions.original_input_id = fixture.original_input_id
+            ORDER BY fixture.original_input_id, fixture.segment_order;
         """)
         # Dashboard and article readers deliberately consume only this frozen,
         # published run. The legacy rows above must never be a fallback.
@@ -168,7 +186,8 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_canonical_evidence_and_aliases_do_not_multiply_counts(self):
         self.assertEqual(await self.get('/dashboard/summary'), {
-            "evidence_count": 5, "theme_count": 3, "topic_count": 2, "article_count": 0,
+            "evidence_count": 5, "evidence_with_topic_count": 5, "evidence_without_topic_count": 0,
+            "topic_coverage": "full", "published_taxonomy_run_id": 1, "theme_count": 3, "topic_count": 2, "article_count": 0,
             "awaiting_approval_count": 0, "failed_generation_count": 0,
         })
         topics = await self.get('/taxonomy?type=topic')
@@ -186,7 +205,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
     async def test_inputs_use_only_the_published_snapshot_for_coverage(self):
         payload = await self.get('/inputs')
         by_id = {item['id']: item for item in payload}
-        self.assertEqual(by_id[1]['taxonomy_state'], 'classified')
+        self.assertNotIn('taxonomy_state',by_id[1])
         self.assertEqual(by_id[1]['published_taxonomy_run_id'], 1)
         self.assertEqual(by_id[1]['topics'], [{'id': 1, 'name': 'Cost'}])
         self.assertEqual(by_id[1]['themes'], [{'id': 1, 'name': 'Alpha', 'description': 'Cost'}, {'id': 2, 'name': 'Beta', 'description': 'Cost and delivery'}])
@@ -195,10 +214,48 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         ])
         # This input was excluded from the published cutoff, so it must not
         # acquire a classification from mutable source state.
-        self.assertEqual(by_id[4]['taxonomy_state'], 'pending_classification')
+        self.assertNotIn('taxonomy_state',by_id[4])
         self.assertEqual(by_id[4]['topics'], [])
         self.assertEqual(by_id[4]['themes'], [])
         self.assertNotIn('topic', by_id[4])
+
+    async def test_input_attribute_filters_combine_before_pagination(self):
+        async def ids(**params):
+            response = await self.client.get('/inputs', params=params)
+            self.assertEqual(response.status_code, 200, response.text)
+            return [item['id'] for item in response.json()]
+
+        self.assertEqual(await ids(status='new', has_topic='false'), [4])
+        self.assertEqual(await ids(search='SPLIT', topic='delivery', theme='beta'), [3])
+        self.assertEqual(await ids(topic='COST', theme='alpha', offset=1, limit=1), [2])
+        self.assertEqual(await ids(search='should improve'), [1,2,3,4])
+        self.assertEqual(await ids(source='test', form_key='dashboard-fixture', question_key='primary',
+                                   question_version=1, status='completed', has_topic='true'), [1,2,3])
+        self.assertEqual(await ids(created_from='2026-01-01', created_to='2026-01-01'), [1,2,3,4])
+        self.assertEqual(await ids(created_from='2026-01-02'), [])
+        self.assertEqual(await ids(created_to='2025-12-31'), [])
+        self.assertEqual(await ids(topic='missing'), [])
+        # Percent and underscore are literal characters, not LIKE wildcards.
+        await self.admin.execute("UPDATE original_inputs SET original_text='Literal 50%_ discount',created_at='2026-01-01 23:59:59+00' WHERE id=1")
+        self.assertEqual(await ids(search='%_'), [1])
+        self.assertEqual(await ids(search='%', created_to='2026-01-01'), [1])
+        self.assertEqual(await ids(search='\"; DROP TABLE original_inputs; --'), [])
+        # Recreate a prepublication view only in this disposable fixture schema.
+        async with self.admin.transaction():
+            await self.admin.execute("SELECT set_config('taxonomy.rollback','on',true)")
+            await self.admin.execute("UPDATE taxonomy_runs SET status='superseded' WHERE id=1")
+        self.assertEqual(await ids(has_topic='true'), [])
+        self.assertEqual(await ids(has_topic='false'), [1,2,3,4])
+        self.assertEqual(await ids(topic='Cost'), [])
+
+    async def test_input_attribute_filters_reject_invalid_values(self):
+        for params in ({'status':'failed'}, {'has_topic':'sometimes'}, {'search':'  '},
+                       {'topic':' '}, {'theme':' '}, {'created_from':'not-a-date'},
+                       {'created_from':'2026-02-02','created_to':'2026-01-01'},
+                       {'search':'x'*501}, {'topic':'x'*201}):
+            with self.subTest(params=params):
+                response = await self.client.get('/inputs', params=params)
+                self.assertEqual(response.status_code,422,response.text)
 
     async def test_quality_attestation_is_computed_once_and_immutable(self):
         facts = await compute_run_quality(self.pool, 1)
@@ -260,7 +317,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
             """)
 
         absent = await candidate_run()
-        with self.assertRaisesRegex(asyncpg.PostgresError, "gate is not attested"):
+        with self.assertRaisesRegex(asyncpg.PostgresError, "current-version attestation"):
             await self.admin.fetchval(
                 "SELECT publish_taxonomy_run($1, CURRENT_TIMESTAMP, 'fixture')", absent
             )
@@ -270,7 +327,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
                 taxonomy_run_id, metrics, thresholds, threshold_version, gate_passed, failures, input_sha256
             ) VALUES($1, '{}'::jsonb, '{}'::jsonb, 'fixture', FALSE, ARRAY['fixture_failure'], repeat('f', 64))
         """, failed)
-        with self.assertRaisesRegex(asyncpg.PostgresError, "gate is not attested"):
+        with self.assertRaisesRegex(asyncpg.PostgresError, "current-version attestation"):
             await self.admin.fetchval(
                 "SELECT publish_taxonomy_run($1, CURRENT_TIMESTAMP, 'fixture')", failed
             )
@@ -307,10 +364,14 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
                 INSERT INTO taxonomy_automation_decisions(idempotency_key,policy_version,evidence_cutoff,status,taxonomy_run_id)
                 VALUES($1,'automatic-promotion-v1',CURRENT_TIMESTAMP,'snapshotted',$2)
             """, f"automatic:automatic-promotion-v1:{key}", run_id)
-            await self.admin.execute("""
-                INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,thresholds,threshold_version,gate_passed,failures,input_sha256)
-                VALUES($1,'{}'::jsonb,'{}'::jsonb,'fixture-v1',$2,$3,repeat('f',64))
-            """, run_id, gate_passed, [] if gate_passed else ["fixture_failure"])
+            evidence = await self.admin.fetchval("INSERT INTO taxonomy_run_evidence(taxonomy_run_id,original_input_id,embedding_id) VALUES($1,1,1) RETURNING id",run_id)
+            await self.admin.execute("INSERT INTO topic_memberships(taxonomy_run_id,topic_revision_id,evidence_id) VALUES($1,$2,$3)",run_id,revision_id,evidence)
+            await self.admin.execute("INSERT INTO taxonomy_cluster_memberships(taxonomy_run_id,evidence_id,decision) VALUES($1,$2,'noise')",run_id,evidence)
+            if gate_passed:
+                await compute_run_quality(self.pool,run_id)
+            else:
+                await self.admin.execute("""INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,thresholds,threshold_version,gate_passed,failures,input_sha256)
+                    VALUES($1,'{}','{}','fixture-v1',FALSE,ARRAY['fixture_failure'],repeat('f',64))""",run_id)
             await self.admin.execute("UPDATE taxonomy_runs SET status='ready_for_review',completed_at=CURRENT_TIMESTAMP WHERE id=$1", run_id)
             return run_id
 
@@ -323,7 +384,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
             SELECT decision_kind,automation_policy_version,decided_by,gate_input_sha256
             FROM taxonomy_publication_decisions WHERE taxonomy_run_id=$1
         """, passing)
-        self.assertEqual(tuple(decision), ("automatic", "automatic-promotion-v1", "taxonomy-automation", "f" * 64))
+        self.assertEqual(tuple(decision), ("automatic", "automatic-promotion-v1", "taxonomy-automation", await self.admin.fetchval("SELECT input_sha256 FROM taxonomy_release_attestations WHERE taxonomy_run_id=$1",passing)))
         self.assertEqual(await promote_automatic_candidates(self.pool, policy), 0)
         self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM taxonomy_publication_decisions WHERE taxonomy_run_id=$1", passing), 1)
 
@@ -331,7 +392,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await promote_automatic_candidates(self.pool, policy), 0)
         self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", failed), "ready_for_review")
         self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", passing), "published")
-        with self.assertRaisesRegex(asyncpg.PostgresError, "gate is not attested"):
+        with self.assertRaisesRegex(asyncpg.PostgresError, "current-version attestation"):
             await self.admin.fetchval("SELECT publish_taxonomy_run_automatically($1,$2)", failed, "wrong-policy")
 
 
@@ -860,7 +921,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
             "clustering_model": "hdbscan-0.8.44",
             "topic_model": "qwen3:4b-instruct",
             "theme_model": "qwen3:4b-instruct",
-            "topic_prompt_version": "taxonomy-topic-v1",
+            "topic_prompt_version": "partial-topic-naming/v1",
             "theme_prompt_version": "taxonomy-theme-v1",
         }
         payload.update(overrides)
@@ -894,42 +955,26 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         ])
 
     async def _publish_automatic_fixture(self, run_id: int, policy: AutomationPolicy):
-        """Supply stage-shaped fixture outputs, then use the real DB gate."""
-        await self.admin.execute("UPDATE taxonomy_runs SET status='running',started_at=CURRENT_TIMESTAMP WHERE id=$1", run_id)
-        topic_id = await self.admin.fetchval("INSERT INTO topics DEFAULT VALUES RETURNING id")
-        revision_id = await self.admin.fetchval("""
-            INSERT INTO topic_revisions(taxonomy_run_id,topic_id,cluster_key,name,normalized_name,
-              literal_description,support_count,continuity_decision)
-            VALUES($1,$2,'fixture-cluster','Fixture topic','fixture topic','Fixture topic',3,'new') RETURNING id
-        """, run_id, topic_id)
-        theme_id = await self.admin.fetchval("""
-            INSERT INTO taxonomy_candidate_themes(taxonomy_run_id,name,description,rationale,inference_request,inference_response)
-            VALUES($1,'Fixture theme','Fixture theme','fixture','{}'::jsonb,'{}'::jsonb) RETURNING id
-        """, run_id)
-        await self.admin.execute(
-            "INSERT INTO taxonomy_candidate_theme_topics VALUES($1,$2,$3,TRUE)", run_id, theme_id, revision_id
-        )
-        reconciled = await self.admin.fetchval("""
-            INSERT INTO taxonomy_reconciled_themes(taxonomy_run_id,canonical_candidate_theme_id,normalized_name,topic_set_sha256)
-            VALUES($1,$2,'fixture theme',repeat('a',64)) RETURNING id
-        """, run_id, theme_id)
-        await self.admin.execute(
-            "INSERT INTO taxonomy_reconciled_theme_antecedents VALUES($1,$2,$3,'canonical')",
-            run_id, reconciled, theme_id,
-        )
-        await self.admin.execute("""
-            INSERT INTO taxonomy_release_attestations(taxonomy_run_id,metrics,thresholds,
-              threshold_version,gate_passed,failures,input_sha256)
-            VALUES($1,'{}'::jsonb,'{}'::jsonb,'fixture',TRUE,ARRAY[]::text[],repeat('f',64))
-        """, run_id)
-        await self.admin.execute(
-            "UPDATE taxonomy_runs SET status='ready_for_review',completed_at=CURRENT_TIMESTAMP WHERE id=$1", run_id
-        )
-        await self.admin.execute("""
-            UPDATE taxonomy_run_jobs SET status='completed',completed_at=CURRENT_TIMESTAMP,
-              locked_at=NULL,locked_by=NULL WHERE taxonomy_run_id=$1
-        """, run_id)
-        self.assertEqual(await promote_automatic_candidates(self.pool, policy), 1)
+        """Execute current stage owners with a deterministic model and cluster."""
+        count = await self.admin.fetchval("SELECT count(*) FROM taxonomy_run_evidence WHERE taxonomy_run_id=$1",run_id)
+        plan = ClusterPlan((CandidateCluster(
+            question_id=1,algorithm_label=0,member_indexes=tuple(range(count)),centroid=(1.0,0.0),
+            representatives=((0,"central"),),diagnostics={"policy_version":"partial-topic-policy/v1"},
+            eligible=True,failure_reasons=(),packet_serialized_bytes=2,unique_original_count=3,
+        ),),(),(1.0,)*count)
+        async def response(**kwargs):
+            request=json.loads(kwargs["user_content"])
+            return {"name":"Repeated answers","description":"Repeated answer", "evidence_ids":request["required_evidence_ids"]}
+        with patch("triage_processor.taxonomy_clustering.make_cluster_plan",return_value=plan), patch(
+            "triage_processor.clients.llm.StructuredChatClient.complete",new=AsyncMock(side_effect=response)
+        ):
+            for expected in ("clustering","topic_naming","topic_reconciliation","theme_inference","theme_reconciliation","quality","ready_for_publication"):
+                stage=await claim_next_stage(self.pool,lease_owner="ptr5-scheduler",lease_seconds=60)
+                self.assertIsNotNone(stage,expected)
+                self.assertEqual(stage.stage,expected)
+                await process_stage(self.pool,stage,lease_seconds=60,max_attempts=1,retry_base_seconds=1,retry_max_seconds=1)
+                self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_run_stages WHERE id=$1",stage.id),"completed",expected)
+        self.assertEqual(await promote_automatic_candidates(self.pool,policy),1)
 
     async def test_automation_accepts_generic_and_mixed_evidence_and_rejects_incompatible_vectors(self):
         await self.seed_snapshot_embeddings(model="mixed-fixture", representation="answer-only")
@@ -949,7 +994,7 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         ), 5)
         async with self.pool.acquire() as connection:
             evidence, config = await load_run_evidence(connection, created.run_id)
-        self.assertEqual((len(evidence), config["min_cluster_size"]), (5, 3))
+        self.assertEqual((len(evidence), config["min_cluster_size"]), (5, 2))
         self.assertEqual(await self.admin.fetchval(
             "SELECT embedding_representation FROM taxonomy_runs WHERE id=$1", created.run_id
         ), "mixed")
@@ -998,8 +1043,8 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
 
         published_cutoff = await self.admin.fetchval("SELECT source_cutoff FROM taxonomy_runs WHERE id=$1", first.run_id)
         late_id = await self.admin.fetchval("""
-            INSERT INTO original_inputs(original_text,source,status,created_at)
-            VALUES('Ready late','test','ready_for_analysis',$1::timestamptz - INTERVAL '1 day') RETURNING id
+            INSERT INTO original_inputs(original_text,source,status,question_id,created_at)
+            VALUES('Ready late','test','ready_for_analysis',1,$1::timestamptz - INTERVAL '1 day') RETURNING id
         """, published_cutoff)
         self.assertEqual((await evaluate_automation(self.pool, policy)).reason, "preparing_evidence")
         await self.admin.execute("""
@@ -1030,8 +1075,8 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((blocked.state, blocked.reason), ("blocked", "quality_gate_failed"))
         self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM taxonomy_runs"), 3)
         new_id = await self.admin.fetchval("""
-            INSERT INTO original_inputs(original_text,source,status)
-            VALUES('Changed evidence','test','ready_for_analysis') RETURNING id
+            INSERT INTO original_inputs(original_text,source,status,question_id)
+            VALUES('Changed evidence','test','ready_for_analysis',1) RETURNING id
         """)
         await self.admin.execute("""
             INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
@@ -1083,10 +1128,10 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
             "SELECT source_cutoff FROM taxonomy_runs WHERE status='published'"
         )
         await self.admin.execute("""
-            INSERT INTO original_inputs(original_text,source,status,created_at)
-            VALUES('Legacy A','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds'),
-                  ('Legacy B','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds'),
-                  ('Legacy C','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds')
+            INSERT INTO original_inputs(original_text,source,status,question_id,created_at)
+            VALUES('Legacy A','test','ready_for_analysis',1,$1::timestamptz + INTERVAL '0.01 seconds'),
+                  ('Legacy B','test','ready_for_analysis',1,$1::timestamptz + INTERVAL '0.01 seconds'),
+                  ('Legacy C','test','ready_for_analysis',1,$1::timestamptz + INTERVAL '0.01 seconds')
         """, published_cutoff)
         await self.admin.executemany("""
             INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
@@ -1115,8 +1160,8 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
             "SELECT source_cutoff FROM taxonomy_runs WHERE status='published'"
         )
         new_id = await self.admin.fetchval("""
-            INSERT INTO original_inputs(original_text,source,status,created_at)
-            VALUES('New','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds') RETURNING id
+            INSERT INTO original_inputs(original_text,source,status,question_id,created_at)
+            VALUES('New','test','ready_for_analysis',1,$1::timestamptz + INTERVAL '0.01 seconds') RETURNING id
         """, published_cutoff)
         await self.admin.execute("""
             INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
@@ -1144,8 +1189,8 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
         original_create = create_taxonomy_snapshot
         async def create_after_late_input(pool, request):
             late_id = await self.admin.fetchval("""
-                INSERT INTO original_inputs(original_text,source,status)
-                VALUES('Arrived after reservation','test','ready_for_analysis') RETURNING id
+                INSERT INTO original_inputs(original_text,source,status,question_id)
+                VALUES('Arrived after reservation','test','ready_for_analysis',1) RETURNING id
             """)
             await self.admin.execute("""
                 INSERT INTO input_embeddings(original_input_id,embedding,embedding_model,embedding_representation)
@@ -1205,7 +1250,8 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
             [(row["stage"], row["attempt"], row["status"]) for row in stages],
             [
                 ("snapshot", 1, "completed"), ("clustering", 0, "pending"),
-                ("topic_naming", 0, "pending"), ("theme_inference", 0, "pending"),
+                ("topic_naming", 0, "pending"), ("topic_reconciliation", 0, "pending"),
+                ("theme_inference", 0, "pending"),
                 ("theme_reconciliation", 0, "pending"), ("quality", 0, "pending"),
                 ("ready_for_publication", 0, "pending"),
             ],
@@ -1215,8 +1261,8 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
             "SELECT source_snapshot_sha256 FROM taxonomy_runs WHERE id=$1", run_id
         ))
         await self.admin.execute("""
-            INSERT INTO original_inputs (original_text, source, status)
-            VALUES ('Late answer', 'test', 'completed');
+            INSERT INTO original_inputs (original_text, source, status, question_id)
+            VALUES ('Late answer', 'test', 'completed', 1);
             INSERT INTO input_embeddings (
                 original_input_id, embedding, embedding_model, embedding_representation
             ) VALUES (5, '[1,0]', 'embeddinggemma', 'question-answer');
@@ -1242,10 +1288,10 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
             "SELECT source_cutoff FROM taxonomy_runs WHERE status='published'"
         )
         await self.admin.execute("""
-            INSERT INTO original_inputs(original_text,source,status,created_at)
-            VALUES('Automatic evidence A','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds'),
-                  ('Automatic evidence B','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds'),
-                  ('Automatic evidence C','test','ready_for_analysis',$1::timestamptz + INTERVAL '0.01 seconds');
+            INSERT INTO original_inputs(original_text,source,status,question_id,created_at)
+            VALUES('Automatic evidence A','test','ready_for_analysis',1,$1::timestamptz + INTERVAL '0.01 seconds'),
+                  ('Automatic evidence B','test','ready_for_analysis',1,$1::timestamptz + INTERVAL '0.01 seconds'),
+                  ('Automatic evidence C','test','ready_for_analysis',1,$1::timestamptz + INTERVAL '0.01 seconds');
         """, published_cutoff)
         await asyncio.sleep(1.05)
         await self.admin.execute("""
@@ -1292,38 +1338,68 @@ class DashboardPostgresTests(unittest.IsolatedAsyncioTestCase):
 
     async def _recovery_candidate(self, key="recovery"):
         await self.seed_snapshot_embeddings()
-        result = await create_taxonomy_snapshot(self.pool, SnapshotRequest(**self.snapshot_payload(idempotency_key=key)))
+        configuration = {
+            "version": "batch-snapshot-v1",
+            "cluster_policy_version": "partial-topic-policy/v1",
+            "clustering": {"min_cluster_size": 2, "min_samples": 1},
+        }
+        result = await create_taxonomy_snapshot(self.pool, SnapshotRequest(**self.snapshot_payload(
+            idempotency_key=key,
+            configuration=configuration,
+        )))
         await self.admin.execute("""
             INSERT INTO taxonomy_automation_decisions(idempotency_key,policy_version,evidence_cutoff,status,taxonomy_run_id)
             VALUES($1,'recovery-v1',CURRENT_TIMESTAMP,'snapshotted',$2)
         """, "automatic:" + key, result.id)
         return result.id
 
-    async def test_scheduler_lifecycle_uses_computed_attestation_for_pass_and_fail(self):
-        for passing in (True, False):
-            run_id = await self._recovery_candidate(f"lifecycle-{passing}")
-            plan = ClusterPlan((CandidateCluster(0, tuple(range(5)), (1.0, 0.0), ((0, "central"),)),), (), (1.0,) * 5)
-            response = {"name": "Repeated answers", "description": "Repeated answer"} if passing else {"name": "", "description": ""}
-            async def model_response(**kwargs):
-                if "Name one evidence cluster" in kwargs["system_prompt"]:
-                    return response
-                topics = json.loads(kwargs["user_content"])["topics"]
-                return {"create_theme": True, "name": "Shared experiences", "description": "Experience feedback",
-                        "rationale": "Related experiences", "topic_revision_ids": [item["id"] for item in topics]}
-            with patch("triage_processor.taxonomy_clustering.make_cluster_plan", return_value=plan), patch(
-                "triage_processor.clients.llm.StructuredChatClient.complete", new=AsyncMock(side_effect=model_response)
-            ):
-                for expected in ("clustering", "topic_naming", "theme_inference", "theme_reconciliation", "quality", "ready_for_publication"):
-                    stage = await claim_next_stage(self.pool, lease_owner="lifecycle", lease_seconds=60)
-                    self.assertIsNotNone(stage, expected)
-                    self.assertEqual(stage.stage, expected)
-                    await process_stage(self.pool, stage, lease_seconds=60, max_attempts=1, retry_base_seconds=1, retry_max_seconds=1)
-                    self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_run_stages WHERE id=$1", stage.id), "completed", expected)
-            self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_runs WHERE id=$1", run_id), "ready_for_review")
-            self.assertEqual(await self.admin.fetchval("SELECT count(*) FROM taxonomy_quality_snapshots WHERE taxonomy_run_id=$1", run_id), 0)
-            self.assertEqual(await self.admin.fetchval("SELECT gate_passed FROM taxonomy_release_attestations WHERE taxonomy_run_id=$1", run_id), passing)
-            self.assertEqual(await promote_automatic_candidates(self.pool, AutomationPolicy(version="recovery-v1")), int(passing))
-            self.assertEqual(await self.admin.fetchval("SELECT status FROM taxonomy_run_jobs WHERE taxonomy_run_id=$1", run_id), "completed")
+    async def test_scheduler_materializes_provisional_topics_without_publication(self):
+        run_id = await self._recovery_candidate("provisional-lifecycle")
+        plan = ClusterPlan((CandidateCluster(
+            question_id=1,
+            algorithm_label=0,
+            member_indexes=tuple(range(5)),
+            centroid=(1.0, 0.0),
+            representatives=((0, "central"),),
+            diagnostics={"policy_version": "partial-topic-policy/v1"},
+            eligible=True,
+            failure_reasons=(),
+            packet_serialized_bytes=2,
+            unique_original_count=3,
+        ),), (), (1.0,) * 5)
+
+        async def model_response(**kwargs):
+            request = json.loads(kwargs["user_content"])
+            return {
+                "name": "Repeated answers",
+                "description": "Repeated answer",
+                "evidence_ids": request["required_evidence_ids"],
+            }
+
+        with patch("triage_processor.taxonomy_clustering.make_cluster_plan", return_value=plan), patch(
+            "triage_processor.clients.llm.StructuredChatClient.complete", new=AsyncMock(side_effect=model_response)
+        ):
+            for expected in ("clustering", "topic_naming"):
+                stage = await claim_next_stage(self.pool, lease_owner="lifecycle", lease_seconds=60)
+                self.assertIsNotNone(stage, expected)
+                self.assertEqual(stage.stage, expected)
+                await process_stage(self.pool, stage, lease_seconds=60, max_attempts=1, retry_base_seconds=1, retry_max_seconds=1)
+                self.assertEqual(await self.admin.fetchval(
+                    "SELECT status FROM taxonomy_run_stages WHERE id=$1", stage.id
+                ), "completed", expected)
+
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT count(*) FROM taxonomy_provisional_topics WHERE taxonomy_run_id=$1", run_id
+        ), 1)
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT count(*) FROM topic_revisions WHERE taxonomy_run_id=$1", run_id
+        ), 0)
+        self.assertEqual(await self.admin.fetchval(
+            "SELECT count(*) FROM taxonomy_release_attestations WHERE taxonomy_run_id=$1", run_id
+        ), 0)
+        self.assertEqual(await promote_automatic_candidates(
+            self.pool, AutomationPolicy(version="recovery-v1")
+        ), 0)
 
     async def test_terminal_stage_failure_retry_cancel_and_stale_completion(self):
         run_id = await self._recovery_candidate()

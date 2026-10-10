@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import Annotated, Protocol
 
 import asyncpg
@@ -12,9 +13,16 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 from triage_processor.clients.llm import StructuredChatClient
 from triage_processor.config import DATABASE_URL
 from triage_processor.observability import configure_logging
-from triage_processor.job_queue import QueueSettings, run_job_loop
+from triage_processor.job_queue import (
+    Job,
+    QueueSettings,
+    complete_job_in_transaction,
+    require_job_lease,
+    run_job_loop,
+)
 
 LOGGER = logging.getLogger(__name__)
+PROMPT_VERSION = "eligibility-segmentation/2"
 
 SegmentText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -148,18 +156,6 @@ class LocalLLMClient:
         await self._client.close()
 
 
-DEPENDENT_SEGMENT_OPENERS = {
-    "although",
-    "because",
-    "that",
-    "which",
-    "while",
-    "who",
-    "where",
-    "whose",
-}
-
-
 def _normalized_words(value: str) -> list[str]:
     return re.findall(r"[^\W_]+(?:[-'][^\W_]+)*", value.casefold())
 
@@ -177,12 +173,68 @@ def _segmentation_validation_errors(
             errors.append(
                 f"segments[{index}] is not copied from answer_text"
             )
-        if words and words[0] in DEPENDENT_SEGMENT_OPENERS:
-            errors.append(
-                f"segments[{index}] begins with dependent clause "
-                f"opener {words[0]!r}"
-            )
     return errors
+
+
+@dataclass(frozen=True)
+class PreparationWork:
+    input_id: int
+    original_text: str
+    question_id: int
+    question_text: str
+
+
+async def _load_work(
+    pool: asyncpg.Pool, *, input_id: int | None, job: Job | None
+) -> PreparationWork | None:
+    async with pool.acquire() as connection:
+        if job is not None:
+            row = await connection.fetchrow(
+                """
+                SELECT inputs.id, inputs.original_text, inputs.question_id,
+                       questions.question_text
+                FROM worker_jobs AS jobs
+                JOIN original_inputs AS inputs ON inputs.id = jobs.original_input_id
+                JOIN questions ON questions.id = inputs.question_id
+                WHERE jobs.id = $1 AND jobs.job_type = 'eligibility_segmentation'
+                  AND jobs.status = 'processing' AND jobs.locked_by = $2
+                  AND inputs.id = $3 AND inputs.status = 'new'
+                """,
+                job.id,
+                job.locked_by,
+                job.original_input_id,
+            )
+        elif input_id is None:
+            row = await connection.fetchrow(
+                """
+                SELECT inputs.id, inputs.original_text, inputs.question_id,
+                       questions.question_text
+                FROM original_inputs AS inputs
+                JOIN questions ON questions.id = inputs.question_id
+                WHERE inputs.status = 'new'
+                ORDER BY inputs.id
+                LIMIT 1
+                """
+            )
+        else:
+            row = await connection.fetchrow(
+                """
+                SELECT inputs.id, inputs.original_text, inputs.question_id,
+                       questions.question_text
+                FROM original_inputs AS inputs
+                JOIN questions ON questions.id = inputs.question_id
+                WHERE inputs.id = $1 AND inputs.status = 'new'
+                """,
+                input_id,
+            )
+    if row is None:
+        return None
+    return PreparationWork(
+        input_id=row["id"],
+        original_text=row["original_text"],
+        question_id=row["question_id"],
+        question_text=row["question_text"],
+    )
 
 
 async def process_next_input(
@@ -190,69 +242,64 @@ async def process_next_input(
     segmenter: EligibilitySegmenter,
     *,
     input_id: int | None = None,
+    job: Job | None = None,
+    model: str = "unspecified-model",
+    prompt_version: str = PROMPT_VERSION,
 ) -> bool:
+    work = await _load_work(pool, input_id=input_id, job=job)
+    if work is None:
+        return False
+
+    # The model call deliberately happens after the short read has released
+    # its connection and transaction.
+    decision = await segmenter.classify(work.original_text, work.question_text)
+
     async with pool.acquire() as connection:
         async with connection.transaction():
-            if input_id is None:
-                row = await connection.fetchrow(
-                    """
-                    SELECT
-                        inputs.id,
-                        inputs.original_text,
-                        questions.question_text
-                    FROM original_inputs AS inputs
-                    LEFT JOIN questions
-                        ON questions.id = inputs.question_id
-                    WHERE inputs.status = 'new'
-                    ORDER BY inputs.id
-                    FOR UPDATE OF inputs SKIP LOCKED
-                    LIMIT 1
-                    """
-                )
-            else:
-                row = await connection.fetchrow(
-                    """
-                    SELECT
-                        inputs.id,
-                        inputs.original_text,
-                        questions.question_text
-                    FROM original_inputs AS inputs
-                    LEFT JOIN questions
-                        ON questions.id = inputs.question_id
-                    WHERE inputs.id = $1 AND inputs.status = 'new'
-                    FOR UPDATE OF inputs
-                    """,
-                    input_id,
-                )
-            if row is None:
-                return False
-
-            input_id = row["id"]
-            question_text = row.get("question_text")
-            if question_text is None:
-                decision = await segmenter.classify(row["original_text"])
-            else:
-                decision = await segmenter.classify(
-                    row["original_text"],
-                    question_text,
-                )
-
-            await connection.execute(
-                "DELETE FROM segment_inputs WHERE original_input_id = $1",
-                input_id,
+            if job is not None:
+                await require_job_lease(connection, job)
+            current = await connection.fetchrow(
+                """
+                SELECT original_text, question_id, status
+                FROM original_inputs WHERE id = $1 FOR UPDATE
+                """,
+                work.input_id,
+            )
+            if current is None or current["status"] != "new":
+                raise RuntimeError("input is no longer available for preparation")
+            if (
+                current["original_text"] != work.original_text
+                or current["question_id"] != work.question_id
+            ):
+                raise RuntimeError("input changed during preparation")
+            decision_id = await connection.fetchval(
+                """
+                INSERT INTO input_preparation_decisions (
+                    original_input_id, worker_job_id, eligible, segments,
+                    model, prompt_version, decision_source
+                ) VALUES ($1, $2, $3, $4::jsonb, $5, $6, 'model')
+                RETURNING id
+                """,
+                work.input_id,
+                job.id if job is not None else None,
+                decision.eligible,
+                json.dumps(decision.segments, ensure_ascii=False),
+                model,
+                prompt_version,
             )
             if decision.eligible and decision.segments:
                 await connection.executemany(
                     """
                     INSERT INTO segment_inputs (
                         original_input_id,
+                        preparation_decision_id,
                         segment_order,
                         segment_text
                     )
-                    VALUES ($1, $2, $3)
+                    VALUES ($1, $2, $3, $4)
                     """,
                     [
-                        (input_id, order, segment)
+                        (work.input_id, decision_id, order, segment)
                         for order, segment in enumerate(decision.segments)
                     ],
                 )
@@ -265,13 +312,15 @@ async def process_next_input(
                 SET status = $2
                 WHERE id = $1
                 """,
-                input_id,
+                work.input_id,
                 next_status,
             )
+            if job is not None:
+                await complete_job_in_transaction(connection, job)
 
             LOGGER.info(
                 "Processed input %s: status=%s segments=%s",
-                input_id,
+                work.input_id,
                 next_status,
                 len(decision.segments),
             )
@@ -292,11 +341,13 @@ async def run_worker(*, once: bool, poll_interval: float) -> None:
     )
 
     try:
-        async def handle(input_id: int) -> None:
-            await process_next_input(
+        async def handle(job: Job) -> bool:
+            return await process_next_input(
                 pool,
                 segmenter,
-                input_id=input_id,
+                input_id=job.original_input_id,
+                job=job,
+                model=os.getenv("LLM_MODEL", "qwen3:4b-instruct"),
             )
 
         await run_job_loop(

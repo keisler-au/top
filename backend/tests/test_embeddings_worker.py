@@ -24,6 +24,9 @@ class AsyncContext:
 
 class FakeConnection:
     def __init__(self, original, segments=None):
+        if original is not None:
+            original.setdefault("question_id", 1)
+            original.setdefault("status", "ready_for_embedding")
         self.original = original
         self.segments = segments or []
         self.embedding_rows = []
@@ -101,7 +104,7 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
             {
                 "id": 10,
                 "original_text": "Full input",
-                "question_text": None,
+                "question_text": "What should change?",
             },
             [
                 {"id": 21, "segment_text": "First segment"},
@@ -111,10 +114,10 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
         )
         embedder = FakeEmbedder(
             {
-                "Full input": [1.0, 2.0],
-                "First segment": [3.0, 4.0],
-                "Second segment": [5.0, 6.0],
-                "Third segment": [7.0, 8.0],
+                "Question: What should change?\nAnswer: Full input": [1.0, 2.0],
+                "Question: What should change?\nAnswer: First segment": [3.0, 4.0],
+                "Question: What should change?\nAnswer: Second segment": [5.0, 6.0],
+                "Question: What should change?\nAnswer: Third segment": [7.0, 8.0],
             }
         )
 
@@ -127,21 +130,21 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(processed)
-        self.assertEqual(connection.fetchrow_values, [(10,)])
+        self.assertEqual(connection.fetchrow_values, [(10,), (10,)])
         self.assertEqual(
             embedder.calls,
             [
-                ["Full input", "First segment"],
-                ["Second segment", "Third segment"],
+                ["Question: What should change?\nAnswer: Full input", "Question: What should change?\nAnswer: First segment"],
+                ["Question: What should change?\nAnswer: Second segment", "Question: What should change?\nAnswer: Third segment"],
             ],
         )
         self.assertEqual(
             connection.embedding_rows,
             [
-                (10, None, "[1,2]", "embeddinggemma", "answer-only"),
-                (None, 21, "[3,4]", "embeddinggemma", "answer-only"),
-                (None, 22, "[5,6]", "embeddinggemma", "answer-only"),
-                (None, 23, "[7,8]", "embeddinggemma", "answer-only"),
+                (10, None, "[1,2]", "embeddinggemma", "question-answer"),
+                (None, 21, "[3,4]", "embeddinggemma", "question-answer"),
+                (None, 22, "[5,6]", "embeddinggemma", "question-answer"),
+                (None, 23, "[7,8]", "embeddinggemma", "question-answer"),
             ],
         )
         self.assertEqual(connection.executed, [(10,)])
@@ -151,10 +154,10 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
             {
                 "id": 11,
                 "original_text": "One topic",
-                "question_text": None,
+                "question_text": "What is the topic?",
             }
         )
-        embedder = FakeEmbedder({"One topic": [0.25, -0.5]})
+        embedder = FakeEmbedder({"Question: What is the topic?\nAnswer: One topic": [0.25, -0.5]})
 
         processed = await process_next_input(
             FakePool(connection),
@@ -172,7 +175,7 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
                     None,
                     "[0.25,-0.5]",
                     "embeddinggemma",
-                    "answer-only",
+                    "question-answer",
                 )
             ],
         )
@@ -237,47 +240,49 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original["original_text"], "Price")
         self.assertEqual(segments[0]["segment_text"], "Too expensive")
 
-    async def test_identical_answer_uses_different_contextual_embedding(self):
-        contextual_text = (
+    async def test_identical_answer_uses_different_question_context(self):
+        purchase_text = (
             "Question: What prevented your purchase?\nAnswer: Price"
         )
+        priority_text = "Question: What should we prioritise?\nAnswer: Price"
         embedder = FakeEmbedder(
             {
-                "Price": [1.0, 0.0],
-                contextual_text: [0.0, 1.0],
+                purchase_text: [1.0, 0.0],
+                priority_text: [0.0, 1.0],
             }
         )
-        generic_connection = FakeConnection(
+        purchase_connection = FakeConnection(
             {
                 "id": 13,
-                "original_text": "Price",
-                "question_text": None,
-            }
-        )
-        contextual_connection = FakeConnection(
-            {
-                "id": 14,
                 "original_text": "Price",
                 "question_text": "What prevented your purchase?",
             }
         )
+        priority_connection = FakeConnection(
+            {
+                "id": 14,
+                "original_text": "Price",
+                "question_id": 2,
+                "question_text": "What should we prioritise?",
+            }
+        )
 
         await process_next_input(
-            FakePool(generic_connection),
+            FakePool(purchase_connection),
             embedder,
             batch_size=4,
             embedding_model="embeddinggemma",
         )
         await process_next_input(
-            FakePool(contextual_connection),
+            FakePool(priority_connection),
             embedder,
             batch_size=4,
             embedding_model="embeddinggemma",
         )
 
         self.assertNotEqual(
-            generic_connection.embedding_rows[0][2],
-            contextual_connection.embedding_rows[0][2],
+            purchase_connection.embedding_rows[0][2],
+            priority_connection.embedding_rows[0][2],
         )
 
     async def test_no_ready_input_does_nothing(self):
@@ -301,14 +306,14 @@ class EmbeddingsWorkerTests(unittest.IsolatedAsyncioTestCase):
             {
                 "id": 12,
                 "original_text": "Full",
-                "question_text": None,
+                "question_text": "What should change?",
             },
             [{"id": 24, "segment_text": "Segment"}],
         )
         embedder = FakeEmbedder(
             {
-                "Full": [1.0, 2.0],
-                "Segment": [3.0, 4.0],
+                "Question: What should change?\nAnswer: Full": [1.0, 2.0],
+                "Question: What should change?\nAnswer: Segment": [3.0, 4.0],
             },
             fail_on_call=2,
         )

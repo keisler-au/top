@@ -3,6 +3,8 @@ export type RouteName =
   | "taxonomy"
   | "articles"
   | "article"
+  | "taxonomy-review"
+  | "inputs"
   | "forms"
   | "generate"
   | "not-found";
@@ -24,6 +26,8 @@ export const routes: readonly RouteDefinition[] = [
   { name: "taxonomy", pattern: "/taxonomy", title: "Themes & topics" },
   { name: "articles", pattern: "/articles", title: "Articles" },
   { name: "article", pattern: "/articles/:id", title: "Article" },
+  { name: "taxonomy-review", pattern: "/taxonomy-review", title: "Taxonomy review" },
+  { name: "inputs", pattern: "/inputs", title: "Inputs" },
   { name: "forms", pattern: "/forms", title: "Forms" },
   { name: "generate", pattern: "/generate", title: "Generate article" },
 ] as const;

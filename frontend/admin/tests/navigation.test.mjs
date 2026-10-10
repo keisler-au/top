@@ -11,6 +11,8 @@ test("primary navigation excludes duplicate taxonomy and template destinations",
     primaryNavigation.map(({ href, label, route }) => ({ href, label, route })),
     [
       { href: "/", label: "Overview", route: "overview" },
+      { href: "/taxonomy-review", label: "Taxonomy review", route: "taxonomy-review" },
+      { href: "/inputs", label: "Inputs", route: "inputs" },
       { href: "/articles", label: "Articles", route: "articles" },
       { href: "/forms", label: "Forms", route: "forms" },
     ],

@@ -318,8 +318,10 @@ export class DashboardOverview extends HTMLElement {
   #renderSummary(summary: DashboardSummary): void {
     if (!this.#summaryContent) return;
     const metrics = [
-      ["Evidence", summary.evidence_count, "Classified source points"],
-      ["Themes", summary.theme_count, "Canonical live themes"],
+      ["Evidence", summary.evidence_count, `${summary.topic_coverage === "partial" ? "Partial" : "Full"} topic coverage`],
+      ["With topics", summary.evidence_with_topic_count, "Evidence linked to a topic"],
+      ["Without topics", summary.evidence_without_topic_count, "Evidence retained without a topic"],
+      ["Themes", summary.theme_count, "Optional published themes"],
       ["Topics", summary.topic_count, "Topics with evidence"],
       ["Articles", summary.article_count, "Active articles"],
       ["Awaiting approval", summary.awaiting_approval_count, "Ready for review"],
@@ -426,11 +428,13 @@ export class DashboardOverview extends HTMLElement {
       const heading = document.createElement("h3");
       heading.textContent = this.#state.search
         ? "No matching results"
-        : `No ${this.#state.type === "theme" ? "themes" : "topics"} yet`;
+        : `No ${this.#state.type === "theme" ? "themes" : "topics"}`;
       const text = document.createElement("p");
       text.textContent = this.#state.search
         ? "Try a different search term or clear the search."
-        : "Completed classified evidence will appear here.";
+        : this.#state.type === "theme"
+          ? "Themes are optional. Browse Topics to see accepted topics and generate articles."
+          : "Accepted topics from the published run will appear here.";
       empty.append(heading, text);
       this.#coverageContent.append(empty);
       return;

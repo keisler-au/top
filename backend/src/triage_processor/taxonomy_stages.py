@@ -13,6 +13,7 @@ STAGES = (
     "snapshot",
     "clustering",
     "topic_naming",
+    "topic_reconciliation",
     "theme_inference",
     "theme_reconciliation",
     "quality",

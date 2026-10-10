@@ -9,6 +9,8 @@ export interface NavigationItem {
 
 export const primaryNavigation: readonly NavigationItem[] = [
   { href: "/", label: "Overview", route: "overview", icon: "⌂" },
+  { href: "/taxonomy-review", label: "Taxonomy review", route: "taxonomy-review", icon: "◎" },
+  { href: "/inputs", label: "Inputs", route: "inputs", icon: "≡" },
   { href: "/articles", label: "Articles", route: "articles", icon: "▤" },
   { href: "/forms", label: "Forms", route: "forms", icon: "＋" },
 ];

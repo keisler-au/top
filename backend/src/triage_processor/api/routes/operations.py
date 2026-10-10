@@ -1,3 +1,5 @@
+import json
+
 import asyncpg
 from fastapi import APIRouter, Request
 
@@ -79,6 +81,8 @@ async def operations_summary(request: Request) -> OperationsSummaryResponse:
         taxonomy = await connection.fetchrow(
             """
             SELECT
+                (SELECT id FROM taxonomy_runs WHERE status='published') AS published_taxonomy_run_id,
+                (SELECT taxonomy_publication_facts(id) FROM taxonomy_runs WHERE status='published') AS published_facts,
                 (SELECT count(*) FROM taxonomy_run_jobs WHERE status IN ('pending','processing')) AS active,
                 (SELECT count(*) FROM taxonomy_runs WHERE status='ready_for_review') AS review_backlog,
                 (SELECT max(published_at) FROM taxonomy_runs) AS last_published_at,
@@ -129,6 +133,11 @@ async def operations_summary(request: Request) -> OperationsSummaryResponse:
             automation_state = "preparing_evidence"
         else:
             automation_state = "waiting_for_automation"
+    published_facts = taxonomy["published_facts"]
+    if isinstance(published_facts, str):
+        published_facts = json.loads(published_facts)
+    published_facts = published_facts or {}
+    without_topic = int(published_facts.get("evidence_without_topic_count", 0))
     return OperationsSummaryResponse(
         evidence_pipeline=[_queue_metrics(row, stage=row["stage"]) for row in pipeline_rows],
         topic_validation_corrections=0,
@@ -150,6 +159,10 @@ async def operations_summary(request: Request) -> OperationsSummaryResponse:
         ),
         approvals_last_24_hours=int(approvals),
         taxonomy_runs=TaxonomyRunMetrics(
+            published_taxonomy_run_id=taxonomy["published_taxonomy_run_id"],
+            evidence_with_topic_count=int(published_facts.get("evidence_with_topic_count", 0)),
+            evidence_without_topic_count=without_topic,
+            topic_coverage=("partial" if without_topic else "full") if taxonomy["published_taxonomy_run_id"] is not None else None,
             active=int(taxonomy["active"]), review_backlog=int(taxonomy["review_backlog"]),
             snapshot_evidence_count=int(taxonomy["snapshot_evidence_count"]), noise_count=int(taxonomy["noise_count"]),
             validation_failures=int(taxonomy["validation_failures"]), last_published_at=taxonomy["last_published_at"],

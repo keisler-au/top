@@ -12,6 +12,8 @@ const pageCopy: Record<RouteName, PageCopy> = {
     title: "Evidence overview",
     description: "Coverage metrics and recommendations will be added in WP7.",
   },
+  "taxonomy-review": { eyebrow: "Review", title: "Taxonomy review", description: "Inspect candidate runs." },
+  inputs: { eyebrow: "Evidence", title: "Inputs", description: "Browse input associations." },
   taxonomy: {
     eyebrow: "Explore",
     title: "Themes and topics",

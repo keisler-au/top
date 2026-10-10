@@ -93,9 +93,14 @@ class PublicSiteEndToEndTests(unittest.IsolatedAsyncioTestCase):
             INSERT INTO article_themes(article_id,stable_theme_id,theme_name_snapshot)
             VALUES($1,$2,'Lifecycle theme')
         """, article_id, theme_id)
-        evidence_id = await connection.fetchval(
-            "INSERT INTO original_inputs(original_text,source,status) VALUES('Lifecycle evidence','fixture','completed') RETURNING id"
-        )
+        question_id = await connection.fetchval("""
+            INSERT INTO questions(source,form_key,question_key,question_version,question_text)
+            VALUES('fixture','public-site','lifecycle',1,'What changed?') RETURNING id
+        """)
+        evidence_id = await connection.fetchval("""
+            INSERT INTO original_inputs(original_text,source,status,question_id)
+            VALUES('Lifecycle evidence','fixture','completed',$1) RETURNING id
+        """, question_id)
         await connection.execute("""
             INSERT INTO article_evidence(revision_id,original_input_id,evidence_order,topic_key,taxonomy_run_id)
             VALUES($1,$2,0,'lifecycle',$3)

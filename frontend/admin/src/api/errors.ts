@@ -41,6 +41,15 @@ export function userFacingError(error: unknown): string {
       ? error.body.detail : null;
     const code = typeof detail === "object" && detail !== null && "code" in detail
       ? detail.code : null;
+    if (code === "operations_unauthorized") {
+      return "This operation requires valid operator credentials.";
+    }
+    if (code === "operations_auth_unconfigured") {
+      return "Operator credentials are not configured on the server.";
+    }
+    if (error.status === 429) {
+      return "Too many operator requests. Wait before trying again.";
+    }
     if (code === "taxonomy_first_run") {
       return "No taxonomy has been published yet. Eligible evidence and a successful automatic candidate are required.";
     }
@@ -57,7 +66,7 @@ export function userFacingError(error: unknown): string {
       return "Taxonomy processing failed. An operator must inspect the failed stage and retry it after correcting the cause.";
     }
     if (code === "taxonomy_quality_blocked") {
-      return "The taxonomy candidate did not meet the quality gate. An operator must review the rejected evidence or labels before a new candidate can be published.";
+      return "The taxonomy candidate could not be published. An operator can inspect its publication checks; a candidate needs completed processing, consistent evidence links, and at least one valid topic.";
     }
     if (error.status >= 500) {
       return "The server could not complete the request. Please try again.";

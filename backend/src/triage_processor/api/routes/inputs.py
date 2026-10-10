@@ -1,5 +1,6 @@
 import json
-from typing import Any
+from datetime import date
+from typing import Any, Literal
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -162,19 +163,12 @@ async def create_input(
 ) -> InputResponse:
     async with request.app.state.db_pool.acquire() as connection:
         async with connection.transaction():
-            resolved_question = None
-            if payload.question_context is not None:
-                resolved_question = await resolve_question(
-                    connection,
-                    source=payload.source,
-                    question_context=payload.question_context,
-                )
-
-            question_id = (
-                resolved_question["id"]
-                if resolved_question is not None
-                else None
+            resolved_question = await resolve_question(
+                connection,
+                source=payload.source,
+                question_context=payload.question_context,
             )
+            question_id = resolved_question["id"]
             row = await connection.fetchrow(
                 """
                 INSERT INTO original_inputs (
@@ -246,7 +240,6 @@ async def create_input(
     # Never use the retired string topic as a provisional classification.
     response_data["topics"] = []
     response_data["themes"] = []
-    response_data["taxonomy_state"] = "pending_classification"
     response_data["published_taxonomy_run_id"] = None
     response_data["question_context"] = (
         {
@@ -259,8 +252,6 @@ async def create_input(
                 "form_id",
             )
         }
-        if resolved_question is not None
-        else None
     )
     return InputResponse.model_validate(response_data)
 
@@ -337,6 +328,15 @@ async def list_inputs(
     question_key: str | None = None,
     question_version: int | None = Query(default=None, ge=1),
     submission_key: str | None = None,
+    search: str | None = Query(default=None, max_length=500),
+    processing_status: Literal[
+        "new", "ineligible", "ready_for_embedding", "ready_for_analysis", "completed"
+    ] | None = Query(default=None, alias="status"),
+    topic: str | None = Query(default=None, max_length=200),
+    theme: str | None = Query(default=None, max_length=200),
+    has_topic: bool | None = None,
+    created_from: date | None = None,
+    created_to: date | None = None,
     offset: int = Query(
         default=0,
         ge=0,
@@ -365,6 +365,16 @@ async def list_inputs(
         question_version=question_version,
         submission_key=submission_key,
     )
+
+    text_filters = []
+    for name, value in (("search", search), ("topic", topic), ("theme", theme)):
+        normalized = value.strip() if value is not None else None
+        if normalized == "":
+            raise HTTPException(status_code=422, detail=f"{name} must be non-empty")
+        text_filters.append(normalized)
+    search, topic, theme = text_filters
+    if created_from and created_to and created_from > created_to:
+        raise HTTPException(status_code=422, detail="created_from must not be after created_to")
 
     async with request.app.state.db_pool.acquire() as connection:
         rows = await connection.fetch(
@@ -417,16 +427,6 @@ async def list_inputs(
                 questions.question_text,
                 form_sources.form_id,
                 (SELECT id FROM published_taxonomy_run) AS published_taxonomy_run_id,
-                CASE
-                    WHEN NOT EXISTS (SELECT 1 FROM published_taxonomy_run) THEN 'taxonomy_unavailable'
-                    WHEN EXISTS (
-                        SELECT 1 FROM taxonomy_run_evidence AS evidence
-                        JOIN published_taxonomy_run AS published
-                            ON published.id = evidence.taxonomy_run_id
-                        WHERE evidence.original_input_id = inputs.id
-                    ) THEN 'classified'
-                    ELSE 'pending_classification'
-                END AS taxonomy_state,
                 COALESCE(
                     (
                         SELECT jsonb_agg(
@@ -459,7 +459,7 @@ async def list_inputs(
                     '[]'::jsonb
                 ) AS themes
             FROM original_inputs AS inputs
-            LEFT JOIN questions
+            JOIN questions
                 ON questions.id = inputs.question_id
             LEFT JOIN form_sources
                 ON form_sources.id = questions.form_source_id
@@ -475,6 +475,19 @@ async def list_inputs(
                     $5::text IS NULL
                     OR inputs.submission_key = $5
                 )
+                AND ($8::text IS NULL OR inputs.status = $8)
+                AND ($9::text IS NULL OR strpos(lower(inputs.original_text), lower($9)) > 0
+                     OR strpos(lower(questions.question_text), lower($9)) > 0)
+                AND ($10::text IS NULL OR EXISTS (
+                    SELECT 1 FROM input_topics t WHERE t.input_id=inputs.id
+                    AND strpos(lower(t.name), lower($10)) > 0))
+                AND ($11::text IS NULL OR EXISTS (
+                    SELECT 1 FROM input_themes t WHERE t.input_id=inputs.id
+                    AND strpos(lower(t.name), lower($11)) > 0))
+                AND ($12::boolean IS NULL OR $12 = EXISTS (
+                    SELECT 1 FROM input_topics t WHERE t.input_id=inputs.id))
+                AND ($13::date IS NULL OR inputs.created_at >= ($13::date::timestamp AT TIME ZONE 'UTC'))
+                AND ($14::date IS NULL OR inputs.created_at < (($14::date + 1)::timestamp AT TIME ZONE 'UTC'))
             ORDER BY inputs.id
             OFFSET $6
             LIMIT $7
@@ -486,26 +499,29 @@ async def list_inputs(
             submission_key,
             offset,
             limit,
+            processing_status,
+            search,
+            topic,
+            theme,
+            has_topic,
+            created_from,
+            created_to,
         )
 
     responses: list[InputResponse] = []
     for row in rows:
         response_data = dict(row)
         response_data.setdefault("source_record_key", None)
-        response_data["question_context"] = (
-            {
-                key: response_data.get(key)
-                for key in (
-                    "form_key",
-                    "question_key",
-                    "question_version",
-                    "question_text",
-                    "form_id",
-                )
-            }
-            if response_data["question_id"] is not None
-            else None
-        )
+        response_data["question_context"] = {
+            key: response_data.get(key)
+            for key in (
+                "form_key",
+                "question_key",
+                "question_version",
+                "question_text",
+                "form_id",
+            )
+        }
         for association in ("topics", "themes"):
             value = response_data[association]
             response_data[association] = (

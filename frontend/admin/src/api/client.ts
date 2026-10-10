@@ -1,4 +1,9 @@
 import type {
+  TaxonomyRunListItem,
+  TaxonomyRunReview,
+  TaxonomyTopicEvidence,
+  Input,
+  InputFilters,
   Article,
   ArticleAudit,
   ArticleEvidence,
@@ -102,6 +107,27 @@ export class ApiClient {
     options: RequestOptions = {},
   ): Promise<T> {
     return this.#request("PATCH", path, body, options);
+  }
+
+  inputs(offset = 0, options?: RequestOptions, filters: InputFilters = {}): Promise<Input[]> {
+    const parameters = new URLSearchParams({ offset: String(offset), limit: "50" });
+    for (const [key, value] of Object.entries(filters)) {
+      if (value !== undefined && String(value).trim() !== "") parameters.set(key, String(value).trim());
+    }
+    return this.#get(`/inputs?${parameters}`, options);
+  }
+
+  taxonomyRuns(options?: RequestOptions): Promise<TaxonomyRunListItem[]> {
+    return this.#get("/taxonomy-runs", options);
+  }
+
+  taxonomyRun(id: number, options?: RequestOptions): Promise<TaxonomyRunReview> {
+    return this.#get(`/taxonomy-runs/${id}`, options);
+  }
+
+  taxonomyTopicEvidence(run: number, revision: number, offset = 0,
+    options?: RequestOptions): Promise<TaxonomyTopicEvidence> {
+    return this.#get(`/taxonomy-runs/${run}/topics/${revision}/evidence?offset=${offset}`, options);
   }
 
   summary(options?: RequestOptions): Promise<DashboardSummary> {

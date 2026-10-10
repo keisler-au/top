@@ -404,7 +404,8 @@ async def create_taxonomy_snapshot(
                             _source_hash(evidence) if stage == "snapshot" else None,
                         )
                         for stage in (
-                            "snapshot", "clustering", "topic_naming", "theme_inference",
+                            "snapshot", "clustering", "topic_naming", "topic_reconciliation",
+                            "theme_inference",
                             "theme_reconciliation", "quality", "ready_for_publication",
                         )
                     ]

@@ -67,7 +67,7 @@ test("normalizes API problem responses", async () => {
   );
   assert.match(
     userFacingError(new ApiError(503, { detail: { code: "taxonomy_quality_blocked" } }, "Unavailable")),
-    /quality gate/,
+    /completed processing, consistent evidence links, and at least one valid topic/,
   );
   assert.match(
     userFacingError(new ApiError(503, { detail: { code: "taxonomy_candidate_processing" } }, "Unavailable")),
@@ -251,4 +251,47 @@ test("loads, previews, saves, and transitions an article revision", async () => 
   assert.equal(JSON.parse(requests[5].init.body).rendered_html, "<article>Safe</article>");
   assert.equal(requests[6].url, "/api/articles/9/approve");
   assert.deepEqual(JSON.parse(requests[6].init.body), { note: "Checked" });
+});
+
+test("taxonomy review reads need no credentials and preserve request cancellation", async () => {
+  const calls = [];
+  const client = new ApiClient('/api', async (url, init) => {
+    calls.push({url,init});
+    return new Response(JSON.stringify([]), {status:200,headers:{'Content-Type':'application/json'}});
+  });
+  const controller = new AbortController();
+  const options = {signal:controller.signal};
+  await client.taxonomyRuns(options);
+  await client.taxonomyRun(6, options);
+  await client.taxonomyTopicEvidence(6,11,50,options);
+  await client.inputs();
+  assert.deepEqual(calls.map(c => c.url), ['/api/taxonomy-runs','/api/taxonomy-runs/6',
+    '/api/taxonomy-runs/6/topics/11/evidence?offset=50','/api/inputs?offset=0&limit=50']);
+  assert.ok(calls.slice(0,3).every(c => c.init.headers.Authorization === undefined && c.init.signal === controller.signal));
+  assert.equal(calls[3].init.headers.Authorization,undefined);
+  assert.ok(calls.every(c => !c.url.includes('secret')));
+});
+
+
+test("encodes input filters while preserving false presence and cancellation", async () => {
+  let request;
+  const client = new ApiClient('/api', async (url, init) => {
+    request = {url, init};
+    return new Response('[]', {status:200,headers:{'Content-Type':'application/json'}});
+  });
+  const signal = new AbortController().signal;
+  await client.inputs(50, {signal}, {search:' 50% & fees ',status:'completed',has_topic:false,
+    source:'sheets',form_key:'My form',question_key:'Q1',question_version:2,
+    submission_key:'row:2',topic:'cost',theme:'access',created_from:'2026-01-01',created_to:'2026-02-01'});
+  const params = new URL(request.url,'http://test').searchParams;
+  assert.equal(params.get('search'),'50% & fees');
+  assert.equal(params.get('has_topic'),'false');
+  assert.equal(params.get('offset'),'50');
+  assert.equal(params.get('form_key'),'My form');
+  assert.equal(params.get('question_version'),'2');
+  assert.equal(params.get('status'),'completed');
+  assert.equal(params.get('created_to'),'2026-02-01');
+  assert.equal(request.init.signal,signal);
+  await client.inputs(0,undefined,{topic:' ',search:undefined});
+  assert.equal(request.url,'/api/inputs?offset=0&limit=50');
 });

@@ -22,7 +22,6 @@ short contract in the delivery guide. Boundary changes use the
 | [Architecture](architecture.md) | Canonical plain-language pipeline, design rationale, components, ownership, persistence boundaries, and processing flows. | A component, data owner, runtime flow, rationale, or system boundary changes. |
 | [Architecture contracts](architecture-contracts.md) | Stable AC IDs, implementation owners, invariants and verification obligations. | An architectural decision changes a boundary or invariant. |
 | [Delivery contracts](delivery-contracts.md) | Feature planning, package entry, daily resumption, evidence and handoff. | The delivery workflow changes. |
-| [Active work packages](work-packages.md) | Approved future scope and delivery sequence for partial taxonomy publication and cross-question topic reconciliation. | Package status, dependencies, acceptance evidence, or the selected design changes. |
 | [Architecture baseline review](reviews/architecture-baseline.md) | Evidence and known alignment gaps as of 2026-09-21; not an active backlog. | Preserve as a dated review; link subsequent resolution evidence when available. |
 | [API reference](api.md) | Implemented HTTP endpoints and stable request/response behaviour. | A route, schema, authentication boundary, status, or compatibility behaviour changes. |
 | [Operations](operations.md) | Implemented deployment, migration, worker, recovery, backup, and diagnostic procedures. | Compose, configuration, migrations, queues, recovery, or operational security changes. |
@@ -31,13 +30,31 @@ short contract in the delivery guide. Boundary changes use the
 
 ## Current delivery pipeline
 
-The active [partial-taxonomy and reconciled-topic plan](work-packages.md)
-records the approved future direction and package sequence for answer-focused
-clustering, LLM topic labelling, cross-question equivalence reconciliation,
-optional themes, and truthful partial publication. It is planning only: none of
-that runtime behavior is implemented by the plan. PTR-0 is the next ready
-calibration package. The completed [taxonomy recovery and lifecycle repair
-plan](archive/taxonomy-recovery-and-lifecycle-repair-work-packages.md) records
+The completed [local development plan](archive/streamlined-local-development-work-packages.md)
+records default all-feature startup, automatic backend/frontend updates and
+local activation on 2026-10-10. All 304 backend/PostgreSQL/public-edge tests
+and 54 frontend tests passed; disposable source reload checks also passed.
+The default local stack now uses these sources. No active work package remains.
+
+The completed [partial-taxonomy and reconciled-topic plan](archive/partial-taxonomy-and-reconciled-topic-work-packages.md)
+records PTR-0–PTR-8 and feature-level acceptance. PTR-8 closed on 2026-10-10:
+302 backend/PostgreSQL/API/public-edge tests passed without skips on fresh
+disposable PostgreSQL, 13 populated-upgrade checks passed, and frontend
+typecheck, all 10 test files and build passed. The complete Compose journey
+verified Sheets/API ingestion, real embeddings, partial and full automatic
+publication, cross-question equivalence, optional themes, topic generation,
+approval, failed replacement and explicit rollback. Sheets transport and
+structured chat are deterministic fixtures; production-model semantic accuracy
+is not claimed. These source changes remain uncommitted and unmerged. Local runtime activation
+is recorded in [Current state](current-state.md) and the completed development
+plan below. There is no active work package after verified closure.
+
+The completed [Inputs attribute-filter plan](archive/inputs-attribute-filter-work-packages.md)
+records URL-backed server filters and their frontend/PostgreSQL/API verification
+on 2026-10-10. Local activation is recorded in the development plan below.
+
+The completed
+[taxonomy recovery and lifecycle repair plan](archive/taxonomy-recovery-and-lifecycle-repair-work-packages.md) records
 diagnosis, implementation, integrated verification, and the 2026-09-24
 backup-first recovery of the affected local installation.
 Current-state references describe automatic taxonomy delivery as implemented:

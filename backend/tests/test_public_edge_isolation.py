@@ -110,6 +110,13 @@ class PublicEdgeIsolationTests(unittest.TestCase):
             "/article-generation-jobs/1",
             "/taxonomy",
             "/taxonomy-runs",
+            "/taxonomy-runs/1",
+            "/taxonomy-runs/1/topics/1/evidence",
+            "/taxonomy-review?run=1",
+            "/admin",
+            "/admin/taxonomy-review",
+            "/api/taxonomy-runs/1",
+            "/api/taxonomy-runs/1/topics/1/evidence",
         )
         for path in forbidden_paths:
             with self.subTest(forbidden_path=path):

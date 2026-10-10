@@ -20,6 +20,7 @@ from triage_processor.taxonomy_stage_quality import compute_run_quality
 from triage_processor.taxonomy_stages import ClaimedStage, bounded_error_class, cancel_stage, claim_next_stage, complete_ready_for_review_stage, complete_stage, fail_stage, renew_stage, retry_stage
 from triage_processor.taxonomy_themes import infer_run
 from triage_processor.taxonomy_topics import materialize_run
+from triage_processor.taxonomy_topic_reconciliation import reconcile_topics_run
 from triage_processor.taxonomy_automation import (
     AutomationPolicy, automation_evaluation_due, clear_evaluation_failures,
     evaluate_automation, record_evaluation_failure, record_scheduler_heartbeat,
@@ -90,6 +91,15 @@ async def _infer_themes(pool: asyncpg.Pool, stage: ClaimedStage) -> object:
     )
 
 
+async def _reconcile_topics(pool: asyncpg.Pool, stage: ClaimedStage) -> object:
+    return await reconcile_topics_run(
+        pool, run_id=stage.run_id, stage=stage,
+        base_url=os.getenv("LLM_BASE_URL", "http://localhost:11434/v1"),
+        model=os.getenv("LLM_MODEL", "qwen3:4b-instruct"),
+        api_key=os.getenv("LLM_API_KEY"),
+    )
+
+
 async def _reconcile_themes(pool: asyncpg.Pool, stage: ClaimedStage) -> object:
     return await reconcile_run(pool, stage.run_id, stage=stage)
 
@@ -107,6 +117,7 @@ async def _ready_for_review(pool: asyncpg.Pool, stage: ClaimedStage) -> object:
 HANDLERS: dict[str, StageHandler] = {
     "clustering": _cluster,
     "topic_naming": _name_topics,
+    "topic_reconciliation": _reconcile_topics,
     "theme_inference": _infer_themes,
     "theme_reconciliation": _reconcile_themes,
     "quality": _compute_quality,
@@ -119,7 +130,13 @@ def required_migration_filenames() -> tuple[str, ...]:
     # The migration runner is mounted separately from the worker image. This
     # explicit durable-stage contract marker must be advanced with every
     # scheduler schema change.
-    return ("042_taxonomy_automation_replay.sql",)
+    return (
+        "044_partial_topic_cluster_inputs.sql",
+        "045_add_provisional_topics.sql",
+        "046_add_topic_reconciliation.sql",
+        "047_partial_taxonomy_attestation.sql",
+        "048_partial_taxonomy_publication.sql",
+    )
 
 
 async def _heartbeat(pool: asyncpg.Pool, stage: ClaimedStage, lease_seconds: float) -> None:

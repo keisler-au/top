@@ -132,7 +132,7 @@ class FakeConnection:
             submission_key,
             offset,
             limit,
-        ) = args
+        ) = args[:7]
         matches: list[dict[str, Any]] = []
         for input_row in sorted(
             self.database.inputs,
@@ -176,12 +176,6 @@ class FakeConnection:
             classification = self.database.published_classifications.get(
                 input_row["id"], {"topics": [], "themes": []}
             )
-            covered = input_row["id"] in self.database.published_classifications
-            taxonomy_state = (
-                "taxonomy_unavailable"
-                if self.database.published_taxonomy_run_id is None
-                else "classified" if covered else "pending_classification"
-            )
             matches.append(
                 {
                     **copy.deepcopy(input_row),
@@ -215,7 +209,6 @@ class FakeConnection:
                     ),
                     "topics": classification["topics"],
                     "themes": classification["themes"],
-                    "taxonomy_state": taxonomy_state,
                     "published_taxonomy_run_id": self.database.published_taxonomy_run_id,
                 }
             )
@@ -362,22 +355,14 @@ class InputApiTests(unittest.IsolatedAsyncioTestCase):
         payload.update(overrides)
         return payload
 
-    async def test_generic_payload_remains_supported(self) -> None:
+    async def test_question_context_is_required(self) -> None:
         response = await self.client.post(
             "/inputs",
             json={"original_text": "A generic comment", "source": "manual"},
         )
 
-        self.assertEqual(response.status_code, 201)
-        body = response.json()
-        self.assertEqual(body["original_text"], "A generic comment")
-        self.assertEqual(body["status"], "new")
-        self.assertIsNone(body["question_id"])
-        self.assertIsNone(body["question_context"])
-        self.assertIsNone(body["submission_key"])
-        self.assertIsNone(body["source_record_key"])
-        self.assertEqual(body["themes"], [])
-        self.assertEqual(self.database.transaction_entries, 1)
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(self.database.transaction_entries, 0)
 
     async def test_contextual_payload_creates_and_reuses_question(self) -> None:
         first_response = await self.client.post(
@@ -612,7 +597,7 @@ class InputApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()[0]
         self.assertEqual(body["status"], "completed")
-        self.assertEqual(body["taxonomy_state"], "classified")
+        self.assertNotIn("taxonomy_state", body)
         self.assertEqual(body["published_taxonomy_run_id"], 44)
         self.assertEqual(body["topics"], [
             {"id": 7, "name": "Checkout Friction"},
@@ -628,7 +613,7 @@ class InputApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("inputs.topic", self.database.last_list_query)
         self.assertNotIn("theme_topics", self.database.last_list_query)
 
-    async def test_uncovered_input_is_pending_and_legacy_topic_is_not_exposed(self) -> None:
+    async def test_uncovered_input_has_empty_associations_and_no_legacy_topic(self) -> None:
         created = await self.client.post("/inputs", json=self.contextual_payload())
         self.database.inputs[0]["topic"] = "Retired string topic"
         self.database.published_taxonomy_run_id = 44
@@ -639,19 +624,19 @@ class InputApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         body = response.json()[0]
-        self.assertEqual(body["taxonomy_state"], "pending_classification")
+        self.assertNotIn("taxonomy_state", body)
         self.assertEqual(body["topics"], [])
         self.assertEqual(body["themes"], [])
         self.assertNotIn("topic", body)
         self.assertEqual(created.status_code, 201)
 
-    async def test_input_reports_taxonomy_unavailable_without_publication(self) -> None:
+    async def test_input_has_empty_associations_without_publication(self) -> None:
         await self.client.post("/inputs", json=self.contextual_payload())
         response = await self.client.get("/inputs", params={
             "source": "customer-survey", "form_key": "quarterly-survey",
         })
         body = response.json()[0]
-        self.assertEqual(body["taxonomy_state"], "taxonomy_unavailable")
+        self.assertNotIn("taxonomy_state", body)
         self.assertIsNone(body["published_taxonomy_run_id"])
 
     async def test_retrieval_scope_parameters_require_source_and_form(
@@ -685,10 +670,10 @@ class InputApiTests(unittest.IsolatedAsyncioTestCase):
         for index in range(3):
             response = await self.client.post(
                 "/inputs",
-                json={
-                    "original_text": f"Generic {index}",
-                    "source": "manual",
-                },
+                json=self.contextual_payload(
+                    original_text=f"Generic {index}",
+                    submission_key=f"response-{index}",
+                ),
             )
             self.assertEqual(response.status_code, 201)
 
@@ -702,7 +687,7 @@ class InputApiTests(unittest.IsolatedAsyncioTestCase):
             [item["original_text"] for item in page.json()],
             ["Generic 1"],
         )
-        self.assertEqual(self.database.last_list_args[-2:], (1, 1))
+        self.assertEqual(self.database.last_list_args[5:7], (1, 1))
 
         for params in (
             {"offset": -1},

@@ -46,7 +46,7 @@ test("invalid generation URL values fall back safely", () => {
   assert.deepEqual(state, {
     step: "strategy",
     strategy: "specific",
-    type: "theme",
+    type: "topic",
     key: null,
     sourceStrategy: null,
     jobId: null,

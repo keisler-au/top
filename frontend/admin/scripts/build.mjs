@@ -1,14 +1,18 @@
 import { cp, mkdir, rm } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const projectRoot = new URL("../", import.meta.url);
-const dist = new URL("../dist/", import.meta.url);
+const dist = process.env.FRONTEND_BUILD_DIR
+  ? pathToFileURL(resolve(process.env.FRONTEND_BUILD_DIR) + sep)
+  : new URL("../dist/", import.meta.url);
 
 await rm(dist, { recursive: true, force: true });
 await mkdir(dist, { recursive: true });
 
 const compiler = process.platform === "win32" ? "tsc.cmd" : "tsc";
-const result = spawnSync(compiler, ["-p", "tsconfig.json"], {
+const result = spawnSync(compiler, ["-p", "tsconfig.json", "--outDir", fileURLToPath(new URL("assets/", dist))], {
   cwd: projectRoot,
   stdio: "inherit",
 });

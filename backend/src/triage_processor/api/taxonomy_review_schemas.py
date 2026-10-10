@@ -57,6 +57,16 @@ class TaxonomyRunSummary(BaseModel):
     changed_membership_count: int
 
 
+class TaxonomyTopicAntecedent(BaseModel):
+    id: int
+    name: str
+    description: str
+    question_id: int | None
+    support_count: int
+    relationship: str
+    reconciliation_decision_id: int
+
+
 class TaxonomyRunTopicReview(BaseModel):
     id: int
     topic_id: int
@@ -65,10 +75,30 @@ class TaxonomyRunTopicReview(BaseModel):
     support_count: int
     continuity_decision: str
     representative_evidence_ids: list[int] = Field(default_factory=list)
+    antecedent_provisional_topic_ids: list[int] = Field(default_factory=list)
+    antecedents: list[TaxonomyTopicAntecedent] = Field(default_factory=list)
+
+
+class TaxonomyClusterReview(BaseModel):
+    id: int
+    question_id: int | None
+    support_count: int
+    outcome: str
+    reasons: list[str] = Field(default_factory=list)
+    provisional_topic_id: int | None = None
+    provisional_name: str | None = None
 
 
 class TaxonomyRunReview(TaxonomyRunSummary):
     topics: list[TaxonomyRunTopicReview] = Field(default_factory=list)
     candidate_theme_count: int
+    evidence_count: int = 0
+    evidence_with_topic_count: int = 0
+    evidence_without_topic_count: int = 0
+    clusters: list[TaxonomyClusterReview] = Field(default_factory=list)
+    gate_passed: bool | None = None
+    publication_failures: list[str] = Field(default_factory=list)
+    threshold_version: str | None = None
+    truncated: bool = False
 
 
